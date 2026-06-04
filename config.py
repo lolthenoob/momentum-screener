@@ -2,7 +2,6 @@
 config.py
 ─────────
 Reads and writes user preferences to screener.ini in the app folder.
-All other modules import from here instead of hardcoding values.
 """
 
 import os
@@ -12,11 +11,15 @@ _BASE    = os.path.dirname(os.path.abspath(__file__))
 INI_PATH = os.path.join(_BASE, "screener.ini")
 
 DEFAULTS = {
-    "top_n":        "50",
-    "font_size":    "12",
-    "col_widths":   "",          # comma-separated int list, rebuilt if empty
-    "export_csv":   "false",
-    "output_dir":   "",          # defaults to <app>/output at runtime
+    "top_n":            "50",
+    "font_size":        "12",
+    "col_widths":       "",       # comma-separated pixel widths, rebuilt if empty
+    "export_csv":       "false",
+    "output_dir":       "",       # defaults to <app>/output at runtime
+    "launcher_w":       "720",
+    "launcher_h":       "580",
+    "table_w":          "1600",
+    "table_h":          "860",
 }
 
 
@@ -28,7 +31,7 @@ def _parser() -> configparser.ConfigParser:
     return cp
 
 
-def get(key: str):
+def get(key: str) -> str:
     cp = _parser()
     return cp["screener"].get(key, DEFAULTS.get(key, ""))
 
@@ -57,3 +60,30 @@ def output_dir() -> str:
         d = os.path.join(_BASE, "output")
     os.makedirs(d, exist_ok=True)
     return d
+
+
+def font_size() -> int:
+    return max(8, min(24, get_int("font_size") or 12))
+
+
+def col_pixel_width(col_index: int, default_chars: int) -> int:
+    """Return saved pixel width for a column, or derive from font + default chars."""
+    raw = get("col_widths").strip()
+    if raw:
+        try:
+            widths = [int(x) for x in raw.split(",")]
+            if len(widths) > col_index:
+                return max(20, widths[col_index])
+        except ValueError:
+            pass
+    # Auto-size: roughly font_size * 1.5 pixels per character (Consolas)
+    return max(30, default_chars * int(font_size() * 1.5))
+
+
+def save_col_widths(widths: list):
+    set("col_widths", ",".join(str(int(w)) for w in widths))
+
+
+def clear_col_widths():
+    """Call after font size change so columns auto-resize to new font."""
+    set("col_widths", "")
