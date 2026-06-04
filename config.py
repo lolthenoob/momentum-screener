@@ -16,6 +16,7 @@ DEFAULTS = {
     "col_widths":       "",       # comma-separated pixel widths, rebuilt if empty
     "export_csv":       "false",
     "output_dir":       "",       # defaults to <app>/output at runtime
+    "auto_resize":      "false",  # when true, window sizes scale with font; W/H fields ignored
     "launcher_w":       "720",
     "launcher_h":       "580",
     "table_w":          "1600",

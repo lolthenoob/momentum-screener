@@ -38,44 +38,109 @@ def _show_prefs(root, on_save=None):
     dlg.resizable(False, False)
     dlg.grab_set()
 
-    f  = tkfont.Font(family="Consolas", size=12)
-    fb = tkfont.Font(family="Consolas", size=12, weight="bold")
+    # Use the current configured font size (not a hardcoded 12)
+    fs = config.font_size()
+    f  = tkfont.Font(family="Consolas", size=fs)
+    fb = tkfont.Font(family="Consolas", size=fs, weight="bold")
 
-    fields = [
-        ("Font size (8–24):",          "font_size"),
-        ("Top N per market:",           "top_n"),
+    # ── Simple fields (always editable) ───────────────────────────────────
+    simple_fields = [
+        ("Font size (8–24):",  "font_size"),
+        ("Top N per market:",  "top_n"),
+    ]
+
+    # ── Window-size fields (disabled when auto-resize is on) ───────────────
+    size_fields = [
         ("Launcher width (px):",        "launcher_w"),
         ("Launcher height (px):",       "launcher_h"),
         ("Results table width (px):",   "table_w"),
         ("Results table height (px):",  "table_h"),
     ]
 
-    vars_ = {}
-    for i, (label, key) in enumerate(fields):
+    vars_   = {}
+    entries = {}   # key → Entry widget, for enable/disable
+    row_idx = 0
+
+    for label, key in simple_fields:
         tk.Label(dlg, text=label, bg=CLR_BG, fg=CLR_TEXT,
-                 font=fb, anchor="w", width=26).grid(
-            row=i, column=0, padx=16, pady=6, sticky="w")
+                 font=fb, anchor="w", width=28).grid(
+            row=row_idx, column=0, padx=16, pady=6, sticky="w")
         v = tk.StringVar(value=config.get(key))
         tk.Entry(dlg, textvariable=v, font=f, width=8,
                  relief="flat", highlightthickness=1,
-                 highlightbackground="#CCCCCC").grid(row=i, column=1, padx=8)
+                 highlightbackground="#CCCCCC").grid(row=row_idx, column=1, padx=8)
         vars_[key] = v
+        row_idx += 1
 
+    # ── Auto-resize toggle ─────────────────────────────────────────────────
+    # "Auto-resize" means the windows scale to font size automatically;
+    # the stored W/H values are ignored in that mode.
+    auto_resize_var = tk.BooleanVar(value=config.get_bool("auto_resize"))
+
+    sep = tk.Frame(dlg, bg="#DDDDDD", height=1)
+    sep.grid(row=row_idx, column=0, columnspan=2, sticky="ew", padx=16, pady=(8, 4))
+    row_idx += 1
+
+    auto_frame = tk.Frame(dlg, bg=CLR_BG)
+    auto_frame.grid(row=row_idx, column=0, columnspan=2, sticky="w", padx=16, pady=(0, 4))
+    row_idx += 1
+
+    auto_cb = tk.Checkbutton(
+        auto_frame,
+        text="Auto-resize windows to font size",
+        variable=auto_resize_var,
+        bg=CLR_BG, fg=CLR_TEXT,
+        font=fb,
+        activebackground=CLR_BG,
+        selectcolor=CLR_BG,
+        relief="flat", bd=0,
+        cursor="hand2",
+    )
+    auto_cb.pack(side="left")
+
+    # ── Window-size fields (conditionally enabled) ─────────────────────────
+    for label, key in size_fields:
+        tk.Label(dlg, text=label, bg=CLR_BG, fg=CLR_TEXT,
+                 font=fb, anchor="w", width=28).grid(
+            row=row_idx, column=0, padx=16, pady=4, sticky="w")
+        v = tk.StringVar(value=config.get(key))
+        e = tk.Entry(dlg, textvariable=v, font=f, width=8,
+                     relief="flat", highlightthickness=1,
+                     highlightbackground="#CCCCCC")
+        e.grid(row=row_idx, column=1, padx=8)
+        vars_[key]   = v
+        entries[key] = e
+        row_idx += 1
+
+    def _update_size_fields(*_):
+        state = "disabled" if auto_resize_var.get() else "normal"
+        fg    = CLR_SUBTEXT if auto_resize_var.get() else CLR_TEXT
+        for key in [k for _, k in size_fields]:
+            entries[key].config(state=state, fg=fg)
+
+    auto_resize_var.trace_add("write", _update_size_fields)
+    _update_size_fields()   # apply immediately on open
+
+    # ── Note ──────────────────────────────────────────────────────────────
     note = tk.Label(dlg,
         text="Column widths auto-reset when font size changes.",
         bg=CLR_BG, fg=CLR_SUBTEXT, font=f)
-    note.grid(row=len(fields), column=0, columnspan=2, pady=(4, 0), padx=16, sticky="w")
+    note.grid(row=row_idx, column=0, columnspan=2, pady=(6, 0), padx=16, sticky="w")
+    row_idx += 1
 
     def _save():
         old_fs = config.font_size()
+        config.set("auto_resize", auto_resize_var.get())
         for key, v in vars_.items():
+            # Skip size fields if auto-resize is on
+            if key in [k for _, k in size_fields] and auto_resize_var.get():
+                continue
             raw = v.get().strip()
             if raw:
                 try:
                     config.set(key, int(raw))
                 except ValueError:
                     pass
-        # If font changed, clear saved column widths so they auto-resize
         if config.font_size() != old_fs:
             config.clear_col_widths()
         dlg.destroy()
@@ -83,7 +148,7 @@ def _show_prefs(root, on_save=None):
             on_save()
 
     bf = tk.Frame(dlg, bg=CLR_BG)
-    bf.grid(row=len(fields)+1, column=0, columnspan=2, pady=12)
+    bf.grid(row=row_idx, column=0, columnspan=2, pady=12)
     tk.Button(bf, text="Save", bg=CLR_ACCENT, fg="white",
               font=fb, relief="flat", padx=14, pady=6,
               cursor="hand2", command=_save).pack(side="left", padx=6)
@@ -110,8 +175,15 @@ def launch():
     sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
 
     def _apply_launcher_size():
-        w = min(config.get_int("launcher_w") or 720, sw - 40)
-        h = min(config.get_int("launcher_h") or 580, sh - 40)
+        if config.get_bool("auto_resize"):
+            # Scale window to font size: base 720×580 at fs=12, proportional beyond that
+            fs    = config.font_size()
+            scale = fs / 12
+            w = min(int(720 * scale), sw - 40)
+            h = min(int(580 * scale), sh - 40)
+        else:
+            w = min(config.get_int("launcher_w") or 720, sw - 40)
+            h = min(config.get_int("launcher_h") or 580, sh - 40)
         root.geometry(f"{w}x{h}+{(sw - w) // 2}+{(sh - h) // 2}")
         root.minsize(500, 420)
 
@@ -139,29 +211,120 @@ def launch():
     launcher_panel = tk.Frame(root, bg=CLR_BG)
     status_panel   = tk.Frame(root, bg=CLR_BG)
 
-    # ── Menu bar ──────────────────────────────────────────────────────────
+    # ── Custom menu bar (frame-based so font scales with config) ──────────
     _last_results = {"data": None}
-    menubar = tk.Menu(root)
 
-    file_menu = tk.Menu(menubar, tearoff=0)
-    file_menu.add_command(label="Export results to CSV",
-                          command=lambda: _export_now())
-    file_menu.add_separator()
-    file_menu.add_command(label="Exit", command=root.destroy)
-    menubar.add_cascade(label="File", menu=file_menu)
+    menubar_frame = tk.Frame(root, bg="#E8EDF4", bd=0, relief="flat")
+    menubar_frame.pack(fill="x", side="top")
 
-    edit_menu = tk.Menu(menubar, tearoff=0)
-    edit_menu.add_command(label="Preferences…",
-                          command=lambda: _show_prefs(root, _on_prefs_saved))
-    menubar.add_cascade(label="Edit", menu=edit_menu)
+    _open_popup = {"widget": None, "btn": None}
 
-    root.config(menu=menubar)
+    def _close_open_popup():
+        if _open_popup["widget"] and _open_popup["widget"].winfo_exists():
+            _open_popup["widget"].destroy()
+        if _open_popup["btn"] and _open_popup["btn"].winfo_exists():
+            _open_popup["btn"].config(bg="#E8EDF4", fg=CLR_TEXT)
+        _open_popup["widget"] = None
+        _open_popup["btn"]    = None
+
+    def _make_menu_btn(label, items):
+        btn = tk.Label(
+            menubar_frame, text=label,
+            font=bold(), bg="#E8EDF4", fg=CLR_TEXT,
+            padx=12, pady=4, cursor="hand2",
+        )
+        btn.pack(side="left")
+
+        def _show_dropdown(e=None):
+            if _open_popup["btn"] is btn:
+                _close_open_popup()
+                return
+            _close_open_popup()
+
+            popup = tk.Toplevel(root)
+            popup.overrideredirect(True)
+            popup.configure(bg="#E8EDF4",
+                            highlightthickness=1,
+                            highlightbackground="#BBBBCC")
+            bx = btn.winfo_rootx()
+            by = btn.winfo_rooty() + btn.winfo_height()
+            popup.geometry(f"+{bx}+{by}")
+
+            for item in items:
+                if item is None:
+                    tk.Frame(popup, bg="#CCCCCC", height=1).pack(fill="x", padx=6, pady=2)
+                else:
+                    item_label, item_cmd = item
+                    def _make_cmd(cmd):
+                        def _run(e=None):
+                            _close_open_popup()
+                            cmd()
+                        return _run
+                    row = tk.Label(
+                        popup, text=item_label,
+                        font=bold(), bg="#E8EDF4", fg=CLR_TEXT,
+                        anchor="w", padx=16, pady=5, cursor="hand2",
+                    )
+                    row.pack(fill="x")
+                    _cmd = _make_cmd(item_cmd)
+                    row.bind("<Button-1>", _cmd)
+                    row.bind("<Enter>", lambda e, r=row: r.config(bg=CLR_ACCENT, fg="white"))
+                    row.bind("<Leave>", lambda e, r=row: r.config(bg="#E8EDF4", fg=CLR_TEXT))
+
+            # Register a dismiss handler via after_idle so it fires AFTER
+            # the current click event has fully finished propagating.
+            # This prevents the same click that opens the menu from
+            # immediately closing it, and leaves no lingering binding.
+            def _arm_dismiss():
+                def _on_click_outside(e):
+                    if not _open_popup["widget"]:
+                        return
+                    try:
+                        pw = _open_popup["widget"]
+                        if not pw.winfo_exists():
+                            _close_open_popup()
+                            return
+                        wx, wy = pw.winfo_rootx(), pw.winfo_rooty()
+                        ww, wh = pw.winfo_width(), pw.winfo_height()
+                        if not (wx <= e.x_root <= wx + ww and wy <= e.y_root <= wy + wh):
+                            _close_open_popup()
+                    except Exception:
+                        _close_open_popup()
+
+                # Use FocusOut on the popup instead of a global bind —
+                # when the user clicks anywhere else, the popup loses focus.
+                if popup.winfo_exists():
+                    popup.bind("<FocusOut>", lambda e: _close_open_popup())
+                    # Also catch clicks on the root window itself
+                    popup.bind_all("<ButtonPress-1>", _on_click_outside)
+
+            root.after_idle(_arm_dismiss)
+
+            btn.config(bg=CLR_ACCENT, fg="white")
+            _open_popup["widget"] = popup
+            _open_popup["btn"]    = btn
+
+        btn.bind("<Button-1>", _show_dropdown)
+        btn.bind("<Enter>", lambda e: btn.config(bg=CLR_ACCENT, fg="white")
+                 if _open_popup["btn"] is not btn else None)
+        btn.bind("<Leave>", lambda e: btn.config(bg="#E8EDF4", fg=CLR_TEXT)
+                 if _open_popup["btn"] is not btn else None)
+        return btn
 
     def _export_now():
         if not _last_results["data"]:
             messagebox.showinfo("Export", "Run the screener first.")
             return
         _do_export(_last_results["data"])
+
+    _make_menu_btn("File", [
+        ("Export results to CSV", lambda: _export_now()),
+        None,
+        ("Exit", root.destroy),
+    ])
+    _make_menu_btn("Edit", [
+        ("Preferences\u2026", lambda: _show_prefs(root, _on_prefs_saved)),
+    ])
 
     # ── Header ────────────────────────────────────────────────────────────
     def _make_header(parent):
@@ -330,6 +493,17 @@ def launch():
     def _on_prefs_saved():
         _make_fonts()
         _apply_launcher_size()
+        # Rebuild custom menu bar so button font reflects new size
+        for w in menubar_frame.winfo_children():
+            w.destroy()
+        _make_menu_btn("File", [
+            ("Export results to CSV", lambda: _export_now()),
+            None,
+            ("Exit", root.destroy),
+        ])
+        _make_menu_btn("Edit", [
+            ("Preferences…", lambda: _show_prefs(root, _on_prefs_saved)),
+        ])
         _build_launcher()
 
     # ── Logging ───────────────────────────────────────────────────────────
