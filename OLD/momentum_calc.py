@@ -259,9 +259,6 @@ def _atr(s: pd.Series, period: int = 15) -> float | None:
 def _ma_val(s: pd.Series, window: int) -> float | None:
     s = s.dropna()
     if len(s) < window:
-        # Use available data if at least 60% of window present
-        if len(s) >= max(10, int(window * 0.6)):
-            return float(s.mean())
         return None
     return float(s.rolling(window).mean().iloc[-1])
 
@@ -447,27 +444,6 @@ def _score(df: pd.DataFrame) -> pd.DataFrame:
 
     df["momentum_score"] = df[rank_cols].mean(axis=1)
     return df.sort_values("momentum_score", ascending=False)
-
-
-# ── Cache age helper ─────────────────────────────────────────────────────────
-
-def cache_data_age_days() -> int | None:
-    """
-    Returns how many days ago the most recent price fetch was,
-    or None if no cache exists yet.
-    """
-    try:
-        conn = _get_db()
-        row  = conn.execute(
-            "SELECT MAX(fetched_at) FROM fetch_log"
-        ).fetchone()
-        conn.close()
-        if not row or not row[0]:
-            return None
-        last = datetime.fromisoformat(row[0])
-        return (datetime.now() - last).days
-    except Exception:
-        return None
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
