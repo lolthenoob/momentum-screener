@@ -106,6 +106,21 @@ def _ram_clr(v):
     if v < 0.6:   return CLR_RED
     return CLR_YELLOW
 
+def _vol_ratio_clr(v):
+    if _nan(v):   return CLR_ROW_A
+    if v > 1.5:   return CLR_GREEN
+    if v > 1.1:   return CLR_BLUE
+    if v < 0.7:   return CLR_RED
+    return CLR_ROW_A
+
+def _high_52w_clr(v):
+    """v is negative pct below 52w high. 0 = at high."""
+    if _nan(v):    return CLR_ROW_A
+    if v >= -0.05: return CLR_GREEN   # within 5% of high
+    if v >= -0.15: return CLR_BLUE    # within 15%
+    if v <= -0.30: return CLR_RED     # more than 30% below
+    return CLR_YELLOW
+
 def _mk(fn):
     return lambda v, _r: fn(v)
 
@@ -114,26 +129,34 @@ def _mk(fn):
 # frozen=True → Rank + Ticker pane, never scrolls horizontally
 
 COLUMNS = [
-    ("Rank",        "rank",           4,  lambda v, _: str(v),               None,             True),
+    ("Rank",        "rank",           6,  lambda v, _: str(v),               None,             True),
     ("Ticker",      "symbol",        10,  lambda v, _: str(v),               None,             True),
-    ("Name",        "name",          20,  lambda v, _: str(v) if v else "—", None,             False),
-    ("Market",      "market",         6,  lambda v, _: str(v),               None,             False),
+    ("Name",        "name",          25,  lambda v, _: str(v) if v else "—", None,             False),
+    ("Sector",      "sector",        18,  lambda v, _: str(v) if v else "—", None,             False),
+    ("Market",      "market",         8,  lambda v, _: str(v),               None,             False),
     ("Price",       "price",          9,  _fmt_price,                        None,             False),
-    ("Score",       "momentum_score", 6,  lambda v, _: _fmt_num(v, 1),      _mk(_score_clr),  False),
-    ("RAM Score",   "ram_score",      8,  lambda v, _: _fmt_num(v, 3),      _mk(_ram_clr),    False),
-    ("Exp Slope",   "exp_slope",      9,  _fmt_slope,                        _mk(_slope_clr),  False),
-    ("12-1M Ret",   "ret_12_1",       9,  _fmt_pct,                          _mk(_ret_clr),    False),
-    ("3M Ret",      "ret_3m",         8,  _fmt_pct,                          _mk(_ret_clr),    False),
-    ("Stoch %K",    "stoch_k",        8,  lambda v, _: _fmt_num(v, 1),      lambda v, _: _osc_clr(v, 20, 80),   False),
-    ("Stoch %D",    "stoch_d",        8,  lambda v, _: _fmt_num(v, 1),      lambda v, _: _osc_clr(v, 20, 80),   False),
-    ("RSI",         "rsi",            6,  lambda v, _: _fmt_num(v, 1),      lambda v, _: _osc_clr(v, 30, 70),   False),
-    ("CCI",         "cci",            7,  lambda v, _: _fmt_num(v, 0),      lambda v, _: _osc_clr(v, -100, 100),False),
-    ("Williams %R", "wpr",            9,  lambda v, _: _fmt_num(v, 1),      lambda v, _: _osc_clr(v, -80, -20, good_high=False), False),
-    ("ATR(15)",     "atr",            7,  lambda v, _: _fmt_num(v, 2),      None,             False),
-    ("MA25",        "above_ma25",     5,  _fmt_ma_flag,                      _mk(_ma_flag_clr),False),
-    ("MA50",        "above_ma50",     5,  _fmt_ma_flag,                      _mk(_ma_flag_clr),False),
-    ("MA100",       "above_ma100",    6,  _fmt_ma_flag,                      _mk(_ma_flag_clr),False),
-    ("MA200",       "above_ma200",    6,  _fmt_ma_flag,                      _mk(_ma_flag_clr),False),
+    ("Score",       "momentum_score", 8,  lambda v, _: _fmt_num(v, 1),      _mk(_score_clr),  False),
+    ("Chg",         "rank_change",    6,  lambda v, _: (
+        "NEW" if _nan(v) else (f"▲{int(abs(v))}" if v > 0 else (f"▼{int(abs(v))}" if v < 0 else "–"))
+    ),  lambda v, _: (
+        CLR_ROW_A if _nan(v) else (CLR_GREEN if v > 0 else (CLR_RED if v < 0 else CLR_ROW_A))
+    ),  False),
+    ("RAM Score",   "ram_score",      12,  lambda v, _: _fmt_num(v, 3),      _mk(_ram_clr),    False),
+    ("Exp Slope",   "exp_slope",      12,  _fmt_slope,                        _mk(_slope_clr),  False),
+    ("12-1M Ret",   "ret_12_1",       12,  _fmt_pct,                          _mk(_ret_clr),    False),
+    ("3M Ret",      "ret_3m",         12,  _fmt_pct,                          _mk(_ret_clr),    False),
+    ("Stoch %K",    "stoch_k",        12,  lambda v, _: _fmt_num(v, 1),      lambda v, _: _osc_clr(v, 20, 80),   False),
+    ("Stoch %D",    "stoch_d",        12,  lambda v, _: _fmt_num(v, 1),      lambda v, _: _osc_clr(v, 20, 80),   False),
+    ("RSI",         "rsi",            8,  lambda v, _: _fmt_num(v, 1),      lambda v, _: _osc_clr(v, 30, 70),   False),
+    ("CCI",         "cci",            8,  lambda v, _: _fmt_num(v, 0),      lambda v, _: _osc_clr(v, -100, 100),False),
+    ("Williams %R", "wpr",            12,  lambda v, _: _fmt_num(v, 1),      lambda v, _: _osc_clr(v, -80, -20, good_high=False), False),
+    ("ATR(15)",     "atr",            12,  lambda v, _: _fmt_num(v, 2),      None,             False),
+    ("MA25",        "above_ma25",     8,  _fmt_ma_flag,                      _mk(_ma_flag_clr),False),
+    ("MA50",        "above_ma50",     8,  _fmt_ma_flag,                      _mk(_ma_flag_clr),False),
+    ("MA100",       "above_ma100",    8,  _fmt_ma_flag,                      _mk(_ma_flag_clr),False),
+    ("MA200",       "above_ma200",    8,  _fmt_ma_flag,                      _mk(_ma_flag_clr),False),
+    ("Vol Ratio",   "vol_ratio",     10,  lambda v, _: _fmt_num(v, 2),      _mk(_vol_ratio_clr), False),
+    ("52w High%",   "high_52w_pct",  11,  _fmt_pct,                          _mk(_high_52w_clr),  False),
 ]
 
 FROZEN_COLS = [c for c in COLUMNS if     c[5]]

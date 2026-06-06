@@ -53,7 +53,8 @@ _SIGNAL_COLS = [
     "price", "ram_raw", "ram_score", "exp_slope", "ret_12_1", "ret_3m",
     "stoch_k", "stoch_d", "rsi", "cci", "wpr", "atr", "ma_score",
     "above_ma25", "above_ma50", "above_ma100", "above_ma200",
-    "market", "momentum_score", "name",
+    "vol_ratio", "high_52w_pct", "rank_change",
+    "market", "momentum_score", "name", "sector",
 ]
 
 
@@ -83,9 +84,28 @@ def _get_db() -> sqlite3.Connection:
             scored_at   TEXT NOT NULL,
             top_n       INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS signal_prev (
+            symbol      TEXT PRIMARY KEY,
+            data_json   TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS signal_prev_log (
+            id          INTEGER PRIMARY KEY CHECK (id = 1),
+            scored_at   TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS name_cache (
             symbol      TEXT PRIMARY KEY,
             name        TEXT NOT NULL DEFAULT '',
+            fetched_at  TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS volume_cache (
+            symbol      TEXT NOT NULL,
+            trade_date  TEXT NOT NULL,
+            volume      REAL,
+            PRIMARY KEY (symbol, trade_date)
+        );
+        CREATE TABLE IF NOT EXISTS sector_cache (
+            symbol      TEXT PRIMARY KEY,
+            sector      TEXT NOT NULL DEFAULT '',
             fetched_at  TEXT NOT NULL
         );
     """)
@@ -113,16 +133,26 @@ def _store_prices(conn: sqlite3.Connection, data: pd.DataFrame, tickers: list[st
     if data is None or data.empty:
         return
 
-    close_df = None
+    close_df  = None
+    volume_df = None
+
     if isinstance(data.columns, pd.MultiIndex):
         levels = list(data.columns.names)
         try:
             if "Price" in levels:
-                close_df = data.xs("Close", level="Price", axis=1)
+                close_df  = data.xs("Close",  level="Price", axis=1)
+                try:
+                    volume_df = data.xs("Volume", level="Price", axis=1)
+                except (KeyError, TypeError):
+                    pass
             else:
                 for lvl in range(data.columns.nlevels):
                     try:
                         close_df = data.xs("Close", level=lvl, axis=1)
+                        try:
+                            volume_df = data.xs("Volume", level=lvl, axis=1)
+                        except (KeyError, TypeError):
+                            pass
                         break
                     except (KeyError, TypeError):
                         continue
@@ -132,6 +162,9 @@ def _store_prices(conn: sqlite3.Connection, data: pd.DataFrame, tickers: list[st
         if "Close" in data.columns:
             sym = tickers[0]
             close_df = data[["Close"]].rename(columns={"Close": sym})
+        if "Volume" in data.columns:
+            sym = tickers[0]
+            volume_df = data[["Volume"]].rename(columns={"Volume": sym})
 
     if close_df is None or (hasattr(close_df, "empty") and close_df.empty):
         return
@@ -157,6 +190,22 @@ def _store_prices(conn: sqlite3.Connection, data: pd.DataFrame, tickers: list[st
         "INSERT OR REPLACE INTO fetch_log (symbol, fetched_at, rows_stored) VALUES (?, ?, ?)",
         [(sym, now, rows_per_ticker.get(sym, 0)) for sym in close_df.columns],
     )
+
+    # Store volume if available
+    if volume_df is not None:
+        if isinstance(volume_df, pd.Series):
+            name = volume_df.name if volume_df.name else tickers[0]
+            volume_df = volume_df.to_frame(name=name)
+        vol_rows = []
+        for sym in volume_df.columns:
+            for dt, vol in volume_df[sym].dropna().items():
+                vol_rows.append((sym, dt.strftime("%Y-%m-%d"), float(vol)))
+        if vol_rows:
+            conn.executemany(
+                "INSERT OR REPLACE INTO volume_cache (symbol, trade_date, volume) VALUES (?, ?, ?)",
+                vol_rows,
+            )
+
     conn.commit()
 
 
@@ -215,6 +264,22 @@ def save_signals(results: dict):
                     d[col] = val
             rows.append((sym, json.dumps(d)))
 
+        # Snapshot current signals into signal_prev before overwriting
+        prev_rows = conn.execute(
+            "SELECT symbol, data_json FROM signal_cache"
+        ).fetchall()
+        if prev_rows:
+            conn.execute("DELETE FROM signal_prev")
+            conn.executemany(
+                "INSERT INTO signal_prev (symbol, data_json) VALUES (?, ?)", prev_rows
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO signal_prev_log (id, scored_at) VALUES (1, ?)",
+                (conn.execute(
+                    "SELECT scored_at FROM signal_log WHERE id = 1"
+                ).fetchone() or (scored_at,))[0:1]
+            )
+
         conn.execute("DELETE FROM signal_cache")
         conn.executemany(
             "INSERT INTO signal_cache (symbol, data_json) VALUES (?, ?)", rows
@@ -248,9 +313,9 @@ def load_signals(market_tickers: dict, top_n: int = TOP_N, log=None) -> dict | N
         rows = conn.execute(
             "SELECT symbol, data_json FROM signal_cache"
         ).fetchall()
-        conn.close()
 
         if not rows:
+            conn.close()
             return None
 
         records = []
@@ -263,10 +328,11 @@ def load_signals(market_tickers: dict, top_n: int = TOP_N, log=None) -> dict | N
 
         # Rebuild numeric columns
         for col in _SIGNAL_COLS:
-            if col in df.columns and col not in ("market", "name"):
+            if col in df.columns and col not in ("market", "name", "sector"):
                 df[col] = pd.to_numeric(df[col], errors="coerce")
 
         if "momentum_score" not in df.columns or df.empty:
+            conn.close()
             return None
 
         ticker_to_market = {
@@ -278,6 +344,9 @@ def load_signals(market_tickers: dict, top_n: int = TOP_N, log=None) -> dict | N
             df["market"] = df.index.map(lambda s: ticker_to_market.get(s, "?"))
 
         df = df.sort_values("momentum_score", ascending=False, na_position="last")
+        df = _attach_rank_change(df, conn)
+        conn.close()
+
         overall = df.dropna(subset=["momentum_score"]).head(top_n).copy()
 
         by_market = {}
@@ -297,6 +366,60 @@ def load_signals(market_tickers: dict, top_n: int = TOP_N, log=None) -> dict | N
     except Exception as e:
         print(f"  ⚠  signal cache load failed: {e}")
         return None
+
+
+
+def _attach_rank_change(df, conn):
+    """
+    Attach a rank_change column to df.
+    Positive = moved up (e.g. +3 means ranked 3 places higher than last run).
+    Negative = moved down. NaN = new entry (not in previous signals).
+    Rank is determined by momentum_score position within the full signal_prev universe.
+    """
+    try:
+        prev_rows = conn.execute(
+            "SELECT symbol, data_json FROM signal_prev"
+        ).fetchall()
+        if not prev_rows:
+            df["rank_change"] = np.nan
+            return df
+
+        prev_scores = {}
+        for sym, data_json in prev_rows:
+            try:
+                d = json.loads(data_json)
+                score = d.get("momentum_score")
+                if score is not None:
+                    prev_scores[sym] = float(score)
+            except Exception:
+                pass
+
+        if not prev_scores:
+            df["rank_change"] = np.nan
+            return df
+
+        # Higher score = rank 1 = best
+        prev_series = pd.Series(prev_scores).sort_values(ascending=False)
+        prev_rank   = {sym: i + 1 for i, sym in enumerate(prev_series.index)}
+
+        # Current rank from df (already sorted by momentum_score descending)
+        curr_rank = {sym: i + 1 for i, sym in enumerate(df.index)}
+
+        changes = {}
+        for sym in df.index:
+            curr = curr_rank.get(sym)
+            prev = prev_rank.get(sym)
+            if curr is not None and prev is not None:
+                changes[sym] = prev - curr   # positive = moved up
+            else:
+                changes[sym] = np.nan
+
+        df["rank_change"] = pd.Series(changes)
+    except Exception as e:
+        print(f"  \u26a0  rank_change attach failed: {e}")
+        df["rank_change"] = np.nan
+
+    return df
 
 
 def signal_cache_info() -> tuple[str | None, int | None]:
@@ -436,6 +559,56 @@ def _ma_val(s: pd.Series, window: int) -> float | None:
     return float(s.rolling(window).mean().iloc[-1])
 
 
+def _load_volume(conn: sqlite3.Connection, tickers: list[str]) -> pd.DataFrame:
+    """Load volume history from volume_cache. Returns wide DataFrame (dates × symbols)."""
+    if not tickers:
+        return pd.DataFrame()
+    rows = conn.execute(
+        "SELECT symbol, trade_date, volume FROM volume_cache WHERE symbol IN ({}) ORDER BY trade_date".format(
+            ",".join("?" * len(tickers))
+        ), tickers
+    ).fetchall()
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows, columns=["symbol", "date", "volume"])
+    pivot = df.pivot(index="date", columns="symbol", values="volume")
+    pivot.index = pd.to_datetime(pivot.index)
+    return pivot
+
+
+def _vol_ratio(vol: pd.Series, short: int = 20, long: int = 50) -> float | None:
+    """
+    20-day average volume divided by 50-day average volume.
+    > 1.0 means recent volume is elevated vs the longer baseline.
+    Requires at least long+1 rows.
+    """
+    vol = vol.dropna()
+    if len(vol) < long + 1:
+        return None
+    avg_short = float(vol.iloc[-short:].mean())
+    avg_long  = float(vol.iloc[-long:].mean())
+    if avg_long == 0:
+        return None
+    ratio = avg_short / avg_long
+    return float(ratio) if np.isfinite(ratio) else None
+
+
+def _high_52w_pct(price_series: pd.Series) -> float | None:
+    """
+    How close current price is to the 52-week high, as a percentage below it.
+    0 % = at the 52-week high. -10 % = 10 % below it.
+    Requires at least 252 days of history.
+    """
+    s = price_series.dropna()
+    if len(s) < 252:
+        return None
+    high = float(s.iloc[-252:].max())
+    price = float(s.iloc[-1])
+    if high == 0:
+        return None
+    return float((price / high) - 1)
+
+
 def _exp_reg_slope(s: pd.Series, length: int = EXP_REG_LEN) -> float | None:
     s = s.dropna()
     if len(s) < length:
@@ -552,7 +725,69 @@ def _fetch_names(tickers: list[str], log=None) -> dict[str, str]:
 
 
 
-def _compute_signals(prices: pd.DataFrame) -> pd.DataFrame:
+
+# ── Sector cache helpers ──────────────────────────────────────────────────────
+
+def _load_sectors(conn: sqlite3.Connection, tickers: list[str]) -> dict[str, str]:
+    """Read sectors from sector_cache. Returns {symbol: sector}."""
+    if not tickers:
+        return {}
+    rows = conn.execute(
+        "SELECT symbol, sector FROM sector_cache WHERE symbol IN ({})".format(
+            ",".join("?" * len(tickers))
+        ), tickers
+    ).fetchall()
+    return {sym: sector for sym, sector in rows}
+
+
+def _store_sectors(conn: sqlite3.Connection, sectors: dict[str, str]):
+    if not sectors:
+        return
+    now = datetime.now().isoformat(timespec="seconds")
+    conn.executemany(
+        "INSERT OR REPLACE INTO sector_cache (symbol, sector, fetched_at) VALUES (?, ?, ?)",
+        [(sym, sector or "", now) for sym, sector in sectors.items()],
+    )
+    conn.commit()
+
+
+def _fetch_sectors(tickers: list[str], log=None) -> dict[str, str]:
+    """
+    Fetch sector for each ticker via yfinance .info, caching results permanently.
+    Only tickers not already in sector_cache hit the network.
+    """
+    if not tickers:
+        return {}
+
+    conn = _get_db()
+    cached = _load_sectors(conn, tickers)
+    missing = [t for t in tickers if t not in cached]
+
+    if missing:
+        _log(log, f"  Fetching sectors for {len(missing)} tickers "
+                  f"({len(cached)} already cached)…")
+        fetched = {}
+        total = len(missing)
+        for i, sym in enumerate(missing):
+            try:
+                info   = yf.Ticker(sym).info
+                sector = info.get("sector") or info.get("industry") or ""
+                fetched[sym] = sector
+            except Exception:
+                fetched[sym] = ""
+            if (i + 1) % 10 == 0 or (i + 1) == total:
+                _log(log, f"  Sectors: {i + 1}/{total}")
+
+        _store_sectors(conn, fetched)
+        cached.update(fetched)
+    else:
+        _log(log, f"  Sectors: all {len(tickers)} loaded from cache")
+
+    conn.close()
+    return {t: cached.get(t, "") for t in tickers}
+
+
+def _compute_signals(prices: pd.DataFrame, volumes: pd.DataFrame | None = None) -> pd.DataFrame:
     records = []
     for sym in prices.columns:
         col = prices[sym].dropna()
@@ -566,13 +801,18 @@ def _compute_signals(prices: pd.DataFrame) -> pd.DataFrame:
             ret_12_1 = float(col.iloc[-21] / col.iloc[-252] - 1)
         ret_3m = _safe_ret(col, 63)
 
-        rsi_val         = _rsi(col, 14)
+        rsi_val          = _rsi(col, 14)
         stoch_k, stoch_d = _stochastic(col, 14)
-        cci_val         = _cci(col, 14)
-        wpr_val         = _williams_r(col, 14)
-        atr_val         = _atr(col, 15)
-        exp_slope       = _exp_reg_slope(col, EXP_REG_LEN)
-        ram_raw         = _risk_adj_momentum(col)
+        cci_val          = _cci(col, 14)
+        wpr_val          = _williams_r(col, 14)
+        atr_val          = _atr(col, 15)
+        exp_slope        = _exp_reg_slope(col, EXP_REG_LEN)
+        ram_raw          = _risk_adj_momentum(col)
+        high_52w         = _high_52w_pct(col)
+
+        vol_ratio_val = None
+        if volumes is not None and sym in volumes.columns:
+            vol_ratio_val = _vol_ratio(volumes[sym])
 
         ma25  = _ma_val(col, 25)
         ma50  = _ma_val(col, 50)
@@ -605,6 +845,8 @@ def _compute_signals(prices: pd.DataFrame) -> pd.DataFrame:
             "above_ma50":   above_ma50,
             "above_ma100":  above_ma100,
             "above_ma200":  above_ma200,
+            "vol_ratio":    vol_ratio_val,
+            "high_52w_pct": high_52w,
         })
 
     df = pd.DataFrame(records).set_index("symbol")
@@ -642,6 +884,7 @@ COMPOSITE_SIGNALS = [
     ("cci",        _rank_norm),
     ("wpr",        _rank_norm_inv),
     ("ma_score",   _rank_norm),
+    ("vol_ratio",  _rank_norm),
 ]
 
 
@@ -698,7 +941,11 @@ def run_screener(
         _log(log, "  No price data available.")
         return {}
 
-    signals = _compute_signals(prices)
+    conn        = _get_db()
+    all_tickers = list(prices.columns)
+    volumes     = _load_volume(conn, all_tickers)
+
+    signals = _compute_signals(prices, volumes if not volumes.empty else None)
     scored  = _score(signals)
 
     ticker_to_market = {
@@ -707,6 +954,8 @@ def run_screener(
         for t in tickers
     }
     scored["market"] = scored.index.map(lambda s: ticker_to_market.get(s, "?"))
+    scored = _attach_rank_change(scored, conn)
+    conn.close()
 
     overall = scored.dropna(subset=["momentum_score"]).head(top_n).copy()
 
@@ -725,10 +974,13 @@ def run_screener(
             + [s for mdf in by_market.values() for s in mdf.index]
         )
     )
-    names = _fetch_names(all_result_syms, log=log)
-    overall["name"] = overall.index.map(lambda s: names.get(s, ""))
+    names   = _fetch_names(all_result_syms, log=log)
+    sectors = _fetch_sectors(all_result_syms, log=log)
+    overall["name"]   = overall.index.map(lambda s: names.get(s, ""))
+    overall["sector"] = overall.index.map(lambda s: sectors.get(s, ""))
     for market in by_market:
-        by_market[market]["name"] = by_market[market].index.map(lambda s: names.get(s, ""))
+        by_market[market]["name"]   = by_market[market].index.map(lambda s: names.get(s, ""))
+        by_market[market]["sector"] = by_market[market].index.map(lambda s: sectors.get(s, ""))
 
     results = {
         "overall":   overall,
@@ -746,3 +998,39 @@ def _log(log_fn, msg: str, end: str = "\n"):
     print(msg, end=end, flush=True)
     if log_fn:
         log_fn(msg)
+
+def clear_price_cache():
+    """
+    Delete all rows from price_cache and fetch_log.
+    The next run with 'Download latest prices' ticked will re-fetch everything.
+    Returns (rows_deleted: int, error: str|None).
+    """
+    try:
+        conn = _get_db()
+        price_rows = conn.execute("SELECT COUNT(*) FROM price_cache").fetchone()[0]
+        conn.execute("DELETE FROM price_cache")
+        conn.execute("DELETE FROM fetch_log")
+        conn.execute("DELETE FROM volume_cache")
+        conn.commit()
+        conn.close()
+        return price_rows, None
+    except Exception as e:
+        return 0, str(e)
+
+
+def clear_signal_cache():
+    """
+    Delete all rows from signal_cache and signal_log.
+    The next run will recompute signals from whatever price data is in the DB.
+    Returns (rows_deleted: int, error: str|None).
+    """
+    try:
+        conn = _get_db()
+        sig_rows = conn.execute("SELECT COUNT(*) FROM signal_cache").fetchone()[0]
+        conn.execute("DELETE FROM signal_cache")
+        conn.execute("DELETE FROM signal_log")
+        conn.commit()
+        conn.close()
+        return sig_rows, None
+    except Exception as e:
+        return 0, str(e)

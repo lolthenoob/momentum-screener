@@ -17,7 +17,8 @@ import config
 from ticker_loader import load_all_tickers, ticker_count
 from momentum_calc  import (download_prices, run_screener,
                             cache_data_age_days, cache_signals_age_days,
-                            load_signals, save_signals)
+                            load_signals, save_signals,
+                            clear_price_cache, clear_signal_cache)
 from screener_table import show_screener_table
 
 # ── Colours ───────────────────────────────────────────────────────────────────
@@ -158,6 +159,212 @@ def _show_prefs(root, on_save=None):
 
     # Click outside card to dismiss
     backdrop.bind("<Button-1>", lambda e: _dismiss() if e.widget is backdrop else None)
+
+
+# ── About overlay ─────────────────────────────────────────────────────────────
+
+def _show_about(root):
+    """
+    Modal-like About / methodology panel rendered as a Frame over the root
+    window — same pattern as _show_prefs, no Toplevel created.
+    """
+    fs      = config.font_size()
+    f       = tkfont.Font(family="Consolas", size=fs)
+    fb      = tkfont.Font(family="Consolas", size=fs, weight="bold")
+    title_f = tkfont.Font(family="Consolas", size=fs + 2, weight="bold")
+    small_f = tkfont.Font(family="Consolas", size=max(8, fs - 1))
+
+    backdrop = tk.Frame(root, bg="#000000")
+    backdrop.place(relx=0, rely=0, relwidth=1, relheight=1)
+
+    MARGIN = 24
+    card = tk.Frame(backdrop, bg=CLR_BG,
+                    highlightthickness=1, highlightbackground="#AAAACC")
+    card.place(x=MARGIN, y=MARGIN, relwidth=1.0, relheight=1.0,
+               width=-MARGIN * 2, height=-MARGIN * 2)
+
+    # ── Title row ─────────────────────────────────────────────────────────
+    tk.Label(card, text="About — How It Works", bg=CLR_BG, fg=CLR_TEXT,
+             font=title_f).grid(row=0, column=0, padx=20, pady=(16, 6), sticky="w")
+    tk.Frame(card, bg="#DDDDDD", height=1).grid(
+        row=1, column=0, sticky="ew", padx=16, pady=(0, 8))
+
+    # ── Scrollable text area ───────────────────────────────────────────────
+    text_frame = tk.Frame(card, bg=CLR_BG)
+    text_frame.grid(row=2, column=0, padx=16, pady=(0, 8), sticky="nsew")
+    card.rowconfigure(2, weight=1)
+    card.columnconfigure(0, weight=1)
+
+    txt = tk.Text(
+        text_frame,
+        font=small_f, bg=CLR_BG, fg=CLR_TEXT,
+        relief="flat", wrap="word",
+        highlightthickness=0,
+        cursor="arrow", padx=4,
+    )
+    sb = tk.Scrollbar(text_frame, command=txt.yview)
+    txt.configure(yscrollcommand=sb.set)
+    sb.pack(side="right", fill="y")
+    txt.pack(side="left", fill="both", expand=True)
+
+    # Block editing but allow keyboard scroll and copy
+    txt.bind("<Key>", lambda e: "break"
+             if e.keysym not in ("c", "C", "Up", "Down", "Prior", "Next")
+             or (e.keysym in ("c", "C") and not (e.state & 0x4))
+             else None)
+
+    # ── Tag styles ────────────────────────────────────────────────────────
+    txt.tag_configure("h1",    font=fb,      foreground=CLR_ACCENT)
+    txt.tag_configure("h2",    font=fb,      foreground=CLR_TEXT)
+    txt.tag_configure("body",  font=small_f, foreground=CLR_TEXT)
+    txt.tag_configure("sub",   font=small_f, foreground=CLR_SUBTEXT)
+    txt.tag_configure("warn",  font=small_f, foreground="#CC7700")
+    txt.tag_configure("rule",  font=small_f, foreground="#CCCCCC")
+
+    def ins(text, tag="body"):
+        txt.insert("end", text, tag)
+
+    # ── Content ───────────────────────────────────────────────────────────
+    ins("Momentum Screener\n", "h1")
+    ins("Ranks stocks across US, AU, NZ, and SG markets by a composite\n"
+        "momentum score built from 9 technical signals.\n\n", "sub")
+
+    ins("─" * 60 + "\n", "rule")
+    ins("DATA SOURCES\n", "h2")
+    ins("─" * 60 + "\n", "rule")
+    ins(
+        "  US   S&P 500 constituent list — scraped from Wikipedia.\n"
+        "  AU   ASX listed companies — CSV downloaded from asx.com.au,\n"
+        "       or ASX 200 from Wikipedia if no CSV is present.\n"
+        "  NZ   NZSX equity list — scraped live from nzx.com.\n"
+        "       Warrants, ETFs, and preference shares are excluded.\n"
+        "  SG   Top 150 SGX stocks by market cap — stockanalysis.com.\n"
+        "       Cross-listed HK/China codes are excluded.\n\n"
+        "  Ticker lists are cached locally for 7 days.\n"
+        "  Price history (2 years) is fetched from Yahoo Finance\n"
+        "  and stored in a local SQLite database (data/momentum.db).\n\n",
+        "body",
+    )
+
+    ins("─" * 60 + "\n", "rule")
+    ins("THE 9 SIGNALS\n", "h2")
+    ins("─" * 60 + "\n", "rule")
+    ins(
+        "Each signal is rank-normalised across the full universe\n"
+        "to a 0–100 percentile before being averaged. A score of 85\n"
+        "means the stock ranked in the 85th percentile on average\n"
+        "across all signals — not that any raw value equalled 85.\n\n",
+        "sub",
+    )
+
+    signals = [
+        ("1. Risk-Adj Momentum (RAM)",
+         "12-1 month return divided by annualised volatility,\n"
+         "   then z-scored and mapped to 0–100. Rewards stocks\n"
+         "   with strong returns relative to how much they swing."),
+        ("2. Exp Regression Slope",
+         "Annualised slope of a log-price regression over the last\n"
+         "   90 days, scaled by R². Captures steady, consistent\n"
+         "   uptrends — a high R² matters as much as the slope."),
+        ("3. 12-1 Month Return",
+         "Price return from 12 months ago to 1 month ago (skipping\n"
+         "   the most recent month to avoid short-term reversal).\n"
+         "   The classic academic momentum factor."),
+        ("4. 3-Month Return",
+         "Price return over the last 63 trading days. Confirms\n"
+         "   that recent shorter-term trend agrees with the 12-1M."),
+        ("5. Stochastic %K (14)",
+         "Where the current price sits within the 14-day high/low\n"
+         "   range, expressed as a percentage (0 = at the low,\n"
+         "   100 = at the high)."),
+        ("6. RSI (14)",
+         "Relative Strength Index over 14 days. Measures the\n"
+         "   speed and size of recent up-moves vs down-moves.\n"
+         "   Higher = stronger recent buying pressure."),
+        ("7. CCI (14)",
+         "Commodity Channel Index over 14 days. Measures how\n"
+         "   far price has deviated from its recent average,\n"
+         "   scaled by typical daily variation."),
+        ("8. Williams %R (14)",
+         "Inverted stochastic — distance from current price to\n"
+         "   the 14-day high, as a negative percentage. Ranked\n"
+         "   inversely so that less negative = higher score."),
+        ("9. MA Score (0–4)",
+         "Count of moving averages (25, 50, 100, 200-day) that\n"
+         "   the current price is trading above. 4 = above all\n"
+         "   four; 0 = below all four."),
+    ]
+
+    for name, desc in signals:
+        ins(f"\n  {name}\n", "h2")
+        ins(f"   {desc}\n", "body")
+
+    ins("\n", "body")
+    ins("─" * 60 + "\n", "rule")
+    ins("COMPOSITE SCORE\n", "h2")
+    ins("─" * 60 + "\n", "rule")
+    ins(
+        "  momentum_score = mean of the 9 rank-normalised signals\n\n"
+        "  All signals are weighted equally. Williams %R is the only\n"
+        "  signal ranked inversely (lower raw value = stronger signal).\n"
+        "  Tickers with fewer than 30 days of price history are excluded.\n"
+        "  The 12-1M signal requires at least 252 days of history.\n\n",
+        "body",
+    )
+
+    ins("─" * 60 + "\n", "rule")
+    ins("DISPLAY COLUMNS (not in composite score)\n", "h2")
+    ins("─" * 60 + "\n", "rule")
+    ins(
+        "  ATR (15)     Average True Range over 15 days — volatility context.\n"
+        "  MA25/50/     Tick or cross flags showing which moving averages\n"
+        "  100/200      the stock is currently trading above or below.\n\n",
+        "body",
+    )
+
+    ins("─" * 60 + "\n", "rule")
+    ins("WHAT THIS SCREENER DOES NOT DO\n", "h2")
+    ins("─" * 60 + "\n", "rule")
+    ins(
+        "  · No fundamental screening (P/E, earnings, revenue).\n"
+        "  · No volume filter — low-liquidity stocks can appear.\n"
+        "  · No earnings calendar — scores can reflect pre/post-\n"
+        "    earnings gaps rather than sustained momentum.\n"
+        "  · Scores are relative within each run's universe.\n"
+        "    Re-running on a different market selection will\n"
+        "    produce different scores for the same stock.\n\n",
+        "warn",
+    )
+
+    ins("─" * 60 + "\n", "rule")
+    ins("CACHING\n", "h2")
+    ins("─" * 60 + "\n", "rule")
+    ins(
+        "  Ticker lists    JSON files in data/, refreshed every 7 days.\n"
+        "  Price history   SQLite rows in data/momentum.db, fetched on\n"
+        "                  demand when 'Download latest prices' is ticked.\n"
+        "  Signal cache    Scored results persisted to momentum.db after\n"
+        "                  every compute run. Subsequent runs load instantly\n"
+        "                  unless 'Force recompute' is ticked.\n",
+        "body",
+    )
+
+    txt.config(state="disabled")
+
+    # ── Close button ──────────────────────────────────────────────────────
+    tk.Frame(card, bg="#DDDDDD", height=1).grid(
+        row=3, column=0, sticky="ew", padx=16, pady=(0, 4))
+
+    def _dismiss():
+        backdrop.destroy()
+
+    tk.Button(card, text="Close", bg=CLR_ACCENT, fg="white",
+              font=fb, relief="flat", padx=14, pady=6,
+              cursor="hand2", command=_dismiss).grid(
+        row=4, column=0, pady=(0, 12))
+
+    backdrop.bind("<Button-1>", lambda e: _dismiss() if e.widget is backdrop else None)
+    root.bind("<Escape>", lambda e: _dismiss())
 
 
 # ── Launcher ──────────────────────────────────────────────────────────────────
@@ -328,19 +535,62 @@ def launch():
                  if _open_popup["btn"] is not btn else None)
         return btn
 
-    def _export_now():
-        if not _last_results["data"]:
-            messagebox.showinfo("Export", "Run the screener first.")
+    def _clear_price_cache_cmd():
+        if not messagebox.askyesno(
+            "Clear price cache",
+            "Delete all cached price data?\n\n"
+            "The next run will need 'Download latest prices' ticked to rebuild it.",
+        ):
             return
-        _do_export(_last_results["data"])
+        n, err = clear_price_cache()
+        if err:
+            messagebox.showerror("Error", f"Failed to clear price cache:\n{err}")
+        else:
+            messagebox.showinfo("Done", f"Price cache cleared ({n:,} rows deleted).\n\n"
+                                        "Tick 'Download latest prices' on the next run.")
+        _build_launcher()
+
+    def _clear_signal_cache_cmd():
+        if not messagebox.askyesno(
+            "Clear signal cache",
+            "Delete all cached momentum signals?\n\n"
+            "The next run will recompute signals from existing price data.",
+        ):
+            return
+        n, err = clear_signal_cache()
+        if err:
+            messagebox.showerror("Error", f"Failed to clear signal cache:\n{err}")
+        else:
+            messagebox.showinfo("Done", f"Signal cache cleared ({n:,} rows deleted).\n\n"
+                                        "The next run will recompute from scratch.")
+        _build_launcher()
+
+    def _open_output_folder():
+        import subprocess, sys
+        out_dir = config.output_dir()
+        try:
+            if sys.platform == "win32":
+                os.startfile(out_dir)
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", out_dir])
+            else:
+                subprocess.Popen(["xdg-open", out_dir])
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not open folder:\n{e}")
 
     _make_menu_btn("File", [
-        ("Export results to CSV", lambda: _export_now()),
+        ("Clear price cache",   _clear_price_cache_cmd),
+        ("Clear signal cache",  _clear_signal_cache_cmd),
+        None,
+        ("Open output folder",  _open_output_folder),
         None,
         ("Exit", root.destroy),
     ])
     _make_menu_btn("Edit", [
         ("Preferences\u2026", lambda: _show_prefs(root, _on_prefs_saved)),
+    ])
+    _make_menu_btn("Help", [
+        ("About / How it works", lambda: _show_about(root)),
     ])
 
     # ── Header ────────────────────────────────────────────────────────────
@@ -618,12 +868,18 @@ def launch():
         for w in menubar_frame.winfo_children():
             w.destroy()
         _make_menu_btn("File", [
-            ("Export results to CSV", lambda: _export_now()),
+            ("Clear price cache",   _clear_price_cache_cmd),
+            ("Clear signal cache",  _clear_signal_cache_cmd),
+            None,
+            ("Open output folder",  _open_output_folder),
             None,
             ("Exit", root.destroy),
         ])
         _make_menu_btn("Edit", [
             ("Preferences…", lambda: _show_prefs(root, _on_prefs_saved)),
+        ])
+        _make_menu_btn("Help", [
+            ("About / How it works", lambda: _show_about(root)),
         ])
         _build_launcher()
 
