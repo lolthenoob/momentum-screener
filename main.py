@@ -15,7 +15,9 @@ warnings.filterwarnings("ignore")
 
 import config
 from ticker_loader import load_all_tickers, ticker_count
-from momentum_calc  import download_prices, run_screener, cache_data_age_days
+from momentum_calc  import (download_prices, run_screener,
+                            cache_data_age_days, cache_signals_age_days,
+                            load_signals, save_signals)
 from screener_table import show_screener_table
 
 # ── Colours ───────────────────────────────────────────────────────────────────
@@ -29,27 +31,37 @@ HDR_BOLD_SZ = 18
 HDR_SUB_SZ  = 13
 
 
-# ── Preferences dialog ────────────────────────────────────────────────────────
+# ── Preferences overlay (no Toplevel — avoids Win32 crash) ───────────────────
 
 def _show_prefs(root, on_save=None):
-    dlg = tk.Toplevel(root)
-    dlg.title("Preferences")
-    dlg.configure(bg=CLR_BG)
-    dlg.resizable(False, False)
-    dlg.grab_set()
-
-    # Use the current configured font size (not a hardcoded 12)
+    """
+    Renders a modal-like preferences panel as a Frame placed over the root
+    window. No Toplevel created, so no Win32 system-menu crash.
+    """
     fs = config.font_size()
     f  = tkfont.Font(family="Consolas", size=fs)
     fb = tkfont.Font(family="Consolas", size=fs, weight="bold")
+    title_f = tkfont.Font(family="Consolas", size=fs + 2, weight="bold")
 
-    # ── Simple fields (always editable) ───────────────────────────────────
+    # Semi-transparent dark backdrop
+    backdrop = tk.Frame(root, bg="#000000")
+    backdrop.place(relx=0, rely=0, relwidth=1, relheight=1)
+
+    # Centre card
+    card = tk.Frame(backdrop, bg=CLR_BG,
+                    highlightthickness=1, highlightbackground="#AAAACC")
+    card.place(relx=0.5, rely=0.5, anchor="center")
+
+    tk.Label(card, text="Preferences", bg=CLR_BG, fg=CLR_TEXT,
+             font=title_f).grid(row=0, column=0, columnspan=2,
+                                padx=20, pady=(16, 8), sticky="w")
+    tk.Frame(card, bg="#DDDDDD", height=1).grid(
+        row=1, column=0, columnspan=2, sticky="ew", padx=16, pady=(0, 8))
+
     simple_fields = [
         ("Font size (8–24):",  "font_size"),
         ("Top N per market:",  "top_n"),
     ]
-
-    # ── Window-size fields (disabled when auto-resize is on) ───────────────
     size_fields = [
         ("Launcher width (px):",        "launcher_w"),
         ("Launcher height (px):",       "launcher_h"),
@@ -58,53 +70,41 @@ def _show_prefs(root, on_save=None):
     ]
 
     vars_   = {}
-    entries = {}   # key → Entry widget, for enable/disable
-    row_idx = 0
+    entries = {}
+    row_idx = 2
 
     for label, key in simple_fields:
-        tk.Label(dlg, text=label, bg=CLR_BG, fg=CLR_TEXT,
+        tk.Label(card, text=label, bg=CLR_BG, fg=CLR_TEXT,
                  font=fb, anchor="w", width=28).grid(
-            row=row_idx, column=0, padx=16, pady=6, sticky="w")
+            row=row_idx, column=0, padx=16, pady=5, sticky="w")
         v = tk.StringVar(value=config.get(key))
-        tk.Entry(dlg, textvariable=v, font=f, width=8,
+        tk.Entry(card, textvariable=v, font=f, width=8,
                  relief="flat", highlightthickness=1,
                  highlightbackground="#CCCCCC").grid(row=row_idx, column=1, padx=8)
         vars_[key] = v
         row_idx += 1
 
-    # ── Auto-resize toggle ─────────────────────────────────────────────────
-    # "Auto-resize" means the windows scale to font size automatically;
-    # the stored W/H values are ignored in that mode.
-    auto_resize_var = tk.BooleanVar(value=config.get_bool("auto_resize"))
-
-    sep = tk.Frame(dlg, bg="#DDDDDD", height=1)
-    sep.grid(row=row_idx, column=0, columnspan=2, sticky="ew", padx=16, pady=(8, 4))
+    tk.Frame(card, bg="#DDDDDD", height=1).grid(
+        row=row_idx, column=0, columnspan=2, sticky="ew", padx=16, pady=(8, 4))
     row_idx += 1
 
-    auto_frame = tk.Frame(dlg, bg=CLR_BG)
+    auto_resize_var = tk.BooleanVar(value=config.get_bool("auto_resize"))
+    auto_frame = tk.Frame(card, bg=CLR_BG)
     auto_frame.grid(row=row_idx, column=0, columnspan=2, sticky="w", padx=16, pady=(0, 4))
     row_idx += 1
+    tk.Checkbutton(
+        auto_frame, text="Auto-resize windows to font size",
+        variable=auto_resize_var, bg=CLR_BG, fg=CLR_TEXT, font=fb,
+        activebackground=CLR_BG, selectcolor=CLR_BG,
+        relief="flat", bd=0, cursor="hand2",
+    ).pack(side="left")
 
-    auto_cb = tk.Checkbutton(
-        auto_frame,
-        text="Auto-resize windows to font size",
-        variable=auto_resize_var,
-        bg=CLR_BG, fg=CLR_TEXT,
-        font=fb,
-        activebackground=CLR_BG,
-        selectcolor=CLR_BG,
-        relief="flat", bd=0,
-        cursor="hand2",
-    )
-    auto_cb.pack(side="left")
-
-    # ── Window-size fields (conditionally enabled) ─────────────────────────
     for label, key in size_fields:
-        tk.Label(dlg, text=label, bg=CLR_BG, fg=CLR_TEXT,
+        tk.Label(card, text=label, bg=CLR_BG, fg=CLR_TEXT,
                  font=fb, anchor="w", width=28).grid(
             row=row_idx, column=0, padx=16, pady=4, sticky="w")
         v = tk.StringVar(value=config.get(key))
-        e = tk.Entry(dlg, textvariable=v, font=f, width=8,
+        e = tk.Entry(card, textvariable=v, font=f, width=8,
                      relief="flat", highlightthickness=1,
                      highlightbackground="#CCCCCC")
         e.grid(row=row_idx, column=1, padx=8)
@@ -119,20 +119,20 @@ def _show_prefs(root, on_save=None):
             entries[key].config(state=state, fg=fg)
 
     auto_resize_var.trace_add("write", _update_size_fields)
-    _update_size_fields()   # apply immediately on open
+    _update_size_fields()
 
-    # ── Note ──────────────────────────────────────────────────────────────
-    note = tk.Label(dlg,
-        text="Column widths auto-reset when font size changes.",
-        bg=CLR_BG, fg=CLR_SUBTEXT, font=f)
-    note.grid(row=row_idx, column=0, columnspan=2, pady=(6, 0), padx=16, sticky="w")
+    tk.Label(card, text="Column widths auto-reset when font size changes.",
+             bg=CLR_BG, fg=CLR_SUBTEXT, font=f).grid(
+        row=row_idx, column=0, columnspan=2, pady=(6, 0), padx=16, sticky="w")
     row_idx += 1
+
+    def _dismiss():
+        backdrop.destroy()
 
     def _save():
         old_fs = config.font_size()
         config.set("auto_resize", auto_resize_var.get())
         for key, v in vars_.items():
-            # Skip size fields if auto-resize is on
             if key in [k for _, k in size_fields] and auto_resize_var.get():
                 continue
             raw = v.get().strip()
@@ -143,18 +143,21 @@ def _show_prefs(root, on_save=None):
                     pass
         if config.font_size() != old_fs:
             config.clear_col_widths()
-        dlg.destroy()
+        _dismiss()
         if on_save:
             on_save()
 
-    bf = tk.Frame(dlg, bg=CLR_BG)
+    bf = tk.Frame(card, bg=CLR_BG)
     bf.grid(row=row_idx, column=0, columnspan=2, pady=12)
     tk.Button(bf, text="Save", bg=CLR_ACCENT, fg="white",
               font=fb, relief="flat", padx=14, pady=6,
               cursor="hand2", command=_save).pack(side="left", padx=6)
     tk.Button(bf, text="Cancel", bg="#888888", fg="white",
               font=fb, relief="flat", padx=14, pady=6,
-              cursor="hand2", command=dlg.destroy).pack(side="left")
+              cursor="hand2", command=_dismiss).pack(side="left")
+
+    # Click outside card to dismiss
+    backdrop.bind("<Button-1>", lambda e: _dismiss() if e.widget is backdrop else None)
 
 
 # ── Launcher ──────────────────────────────────────────────────────────────────
@@ -175,17 +178,21 @@ def launch():
     sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
 
     def _apply_launcher_size():
+        base_w = 900
+        base_h = 750
+
         if config.get_bool("auto_resize"):
-            # Scale window to font size: base 720×580 at fs=12, proportional beyond that
             fs    = config.font_size()
             scale = fs / 12
-            w = min(int(720 * scale), sw - 40)
-            h = min(int(580 * scale), sh - 40)
+            w = min(int(base_w * scale), sw - 40)
+            h = min(int(base_h * scale), sh - 40)
         else:
-            w = min(config.get_int("launcher_w") or 720, sw - 40)
-            h = min(config.get_int("launcher_h") or 580, sh - 40)
+            w = min(config.get_int("launcher_w") or base_w, sw - 40)
+            h = min(config.get_int("launcher_h") or base_h, sh - 40)
         root.geometry(f"{w}x{h}+{(sw - w) // 2}+{(sh - h) // 2}")
-        root.minsize(500, 420)
+        fs_now = config.font_size()
+        root.minsize(max(600, int(base_w * fs_now / 12)),
+                     max(400, int(base_h * fs_now / 12)))
 
     _apply_launcher_size()
 
@@ -198,7 +205,7 @@ def launch():
         _fonts["bold"]     = tkfont.Font(family="Consolas", size=fs, weight="bold")
         _fonts["hdr_bold"] = tkfont.Font(family="Consolas", size=HDR_BOLD_SZ, weight="bold")
         _fonts["hdr_sub"]  = tkfont.Font(family="Consolas", size=HDR_SUB_SZ)
-        _fonts["tick"]     = tkfont.Font(family="Segoe UI Symbol", size=fs + 4)
+        _fonts["tick"]     = tkfont.Font(family="Segoe UI Symbol", size=fs + 0)
 
     _make_fonts()
     mono     = lambda: _fonts["mono"]
@@ -210,6 +217,7 @@ def launch():
     # ── Panels ────────────────────────────────────────────────────────────
     launcher_panel = tk.Frame(root, bg=CLR_BG)
     status_panel   = tk.Frame(root, bg=CLR_BG)
+    results_panel  = tk.Frame(root, bg=CLR_BG)
 
     # ── Custom menu bar (frame-based so font scales with config) ──────────
     _last_results = {"data": None}
@@ -221,6 +229,7 @@ def launch():
 
     def _close_open_popup():
         if _open_popup["widget"] and _open_popup["widget"].winfo_exists():
+            _open_popup["widget"].place_forget()
             _open_popup["widget"].destroy()
         if _open_popup["btn"] and _open_popup["btn"].winfo_exists():
             _open_popup["btn"].config(bg="#E8EDF4", fg=CLR_TEXT)
@@ -241,18 +250,15 @@ def launch():
                 return
             _close_open_popup()
 
-            popup = tk.Toplevel(root)
-            popup.overrideredirect(True)
-            popup.configure(bg="#E8EDF4",
-                            highlightthickness=1,
-                            highlightbackground="#BBBBCC")
-            bx = btn.winfo_rootx()
-            by = btn.winfo_rooty() + btn.winfo_height()
-            popup.geometry(f"+{bx}+{by}")
+            # Build dropdown as a plain Frame placed on root — no Toplevel
+            popup = tk.Frame(root, bg="#E8EDF4",
+                             highlightthickness=1,
+                             highlightbackground="#BBBBCC")
 
             for item in items:
                 if item is None:
-                    tk.Frame(popup, bg="#CCCCCC", height=1).pack(fill="x", padx=6, pady=2)
+                    tk.Frame(popup, bg="#CCCCCC", height=1).pack(
+                        fill="x", padx=6, pady=2)
                 else:
                     item_label, item_cmd = item
                     def _make_cmd(cmd):
@@ -271,10 +277,13 @@ def launch():
                     row.bind("<Enter>", lambda e, r=row: r.config(bg=CLR_ACCENT, fg="white"))
                     row.bind("<Leave>", lambda e, r=row: r.config(bg="#E8EDF4", fg=CLR_TEXT))
 
-            # Register a dismiss handler via after_idle so it fires AFTER
-            # the current click event has fully finished propagating.
-            # This prevents the same click that opens the menu from
-            # immediately closing it, and leaves no lingering binding.
+            # Position below the menu button, relative to root
+            root.update_idletasks()
+            bx = btn.winfo_rootx() - root.winfo_rootx()
+            by = btn.winfo_rooty() - root.winfo_rooty() + btn.winfo_height()
+            popup.place(x=bx, y=by)
+            popup.lift()
+
             def _arm_dismiss():
                 def _on_click_outside(e):
                     if not _open_popup["widget"]:
@@ -284,19 +293,27 @@ def launch():
                         if not pw.winfo_exists():
                             _close_open_popup()
                             return
-                        wx, wy = pw.winfo_rootx(), pw.winfo_rooty()
+                        pw.update_idletasks()
+                        wx = pw.winfo_rootx() - root.winfo_rootx()
+                        wy = pw.winfo_rooty() - root.winfo_rooty()
                         ww, wh = pw.winfo_width(), pw.winfo_height()
-                        if not (wx <= e.x_root <= wx + ww and wy <= e.y_root <= wy + wh):
+                        ex = e.x_root - root.winfo_rootx()
+                        ey = e.y_root - root.winfo_rooty()
+                        if not (wx <= ex <= wx + ww and wy <= ey <= wy + wh):
                             _close_open_popup()
                     except Exception:
                         _close_open_popup()
 
-                # Use FocusOut on the popup instead of a global bind —
-                # when the user clicks anywhere else, the popup loses focus.
-                if popup.winfo_exists():
-                    popup.bind("<FocusOut>", lambda e: _close_open_popup())
-                    # Also catch clicks on the root window itself
-                    popup.bind_all("<ButtonPress-1>", _on_click_outside)
+                if _open_popup["widget"] and _open_popup["widget"].winfo_exists():
+                    _dismiss_id = root.bind("<ButtonPress-1>", _on_click_outside, "+")
+
+                    def _cleanup_dismiss(e=None, _id=_dismiss_id):
+                        try:
+                            root.unbind("<ButtonPress-1>", _id)
+                        except Exception:
+                            pass
+
+                    _open_popup["widget"].bind("<Destroy>", _cleanup_dismiss)
 
             root.after_idle(_arm_dismiss)
 
@@ -328,7 +345,7 @@ def launch():
 
     # ── Header ────────────────────────────────────────────────────────────
     def _make_header(parent):
-        hdr = tk.Frame(parent, bg=CLR_ACCENT, pady=12)
+        hdr = tk.Frame(parent, bg=CLR_ACCENT, pady=max(4, config.font_size() // 2))
         hdr.pack(fill="x")
         tk.Label(hdr, text="Momentum Screener",
                  bg=CLR_ACCENT, fg="white", font=hdr_bold()).pack()
@@ -338,7 +355,7 @@ def launch():
     # ── Toggle helper ─────────────────────────────────────────────────────
     def _make_toggle(frame, label, var):
         container = tk.Frame(frame, bg=CLR_BG)
-        container.pack(fill="x", pady=3)
+        container.pack(fill="x", pady=max(1, config.font_size() // 6))
         btn = tk.Button(container, text="☐", font=tick_f(),
                         fg="#AAAAAA", bg=CLR_BG, activebackground=CLR_BG,
                         relief="flat", bd=0, cursor="hand2")
@@ -353,10 +370,21 @@ def launch():
         return btn
 
     # ── Option vars ───────────────────────────────────────────────────────
-    top_n_var    = tk.StringVar(value=str(config.get_int("top_n") or 50))
-    force_dl_var = tk.BooleanVar(value=False)
-    tickers_var  = tk.BooleanVar(value=False)
-    export_var   = tk.BooleanVar(value=config.get_bool("export_csv"))
+    top_n_var          = tk.StringVar(value=str(config.get_int("top_n") or 50))
+    download_var       = tk.BooleanVar(value=False)
+    force_signals_var  = tk.BooleanVar(value=False)
+    tickers_var        = tk.BooleanVar(value=False)
+    export_var         = tk.BooleanVar(value=config.get_bool("export_csv"))
+
+    _active = config.get_active_markets()
+    market_vars = {
+        "US": tk.BooleanVar(value="US" in _active),
+        "AU": tk.BooleanVar(value="AU" in _active),
+        "NZ": tk.BooleanVar(value="NZ" in _active),
+        "SG": tk.BooleanVar(value="SG" in _active),
+    }
+    MARKET_LABELS    = {"US": "US  (S&P 500)", "AU": "AU  (ASX)", "NZ": "NZ  (NZX)", "SG": "SG  (SGX / STI)"}
+    MARKET_COLOURS_UI = {"US": "#00A4EF", "AU": "#10B981", "NZ": "#8B5CF6", "SG": "#F59E0B"}
 
     # ── Build launcher content ────────────────────────────────────────────
     def _build_launcher():
@@ -365,30 +393,79 @@ def launch():
 
         _make_header(launcher_panel)
 
-        info_frame = tk.Frame(launcher_panel, bg=CLR_BG, padx=24, pady=12)
+        fs = config.font_size()
+        pad_x = max(12, fs * 2)
+        pad_y = max(6,  fs // 2)
+
+        info_frame = tk.Frame(launcher_panel, bg=CLR_BG, padx=pad_x, pady=pad_y)
         info_frame.pack(fill="x")
 
         for label, val in [
             ("Universe",  "S&P 500 · ASX 300 · NZX 50 · STI + SGX"),
             ("Signals",   "RAM · Exp Slope · 12-1M · 3M · Stoch · RSI · CCI · W%R · MA"),
             ("Output",    f"Top {top_n_var.get()} per market + overall leaderboard"),
-            ("Cache",     "Runs from local cache — tick box below to force re-download"),
+            ("Cache",     "Results loaded from local cache unless boxes ticked below"),
         ]:
             row = tk.Frame(info_frame, bg=CLR_BG)
-            row.pack(fill="x", pady=2)
+            row.pack(fill="x", pady=max(0, fs // 8))
             tk.Label(row, text=f"{label:<12}", font=bold(),
                      bg=CLR_BG, fg=CLR_SUBTEXT, anchor="w", width=14).pack(side="left")
             tk.Label(row, text=val, font=mono(),
                      bg=CLR_BG, fg=CLR_TEXT, anchor="w").pack(side="left")
 
-        tk.Frame(launcher_panel, bg="#DDDDDD", height=1).pack(fill="x", padx=24, pady=(8, 0))
+        tk.Frame(launcher_panel, bg="#DDDDDD", height=1).pack(fill="x", padx=pad_x, pady=(max(4, fs // 3), 0))
 
-        opt_frame = tk.Frame(launcher_panel, bg=CLR_BG, padx=24, pady=12)
+        # ── Market selector ───────────────────────────────────────────────
+        mkt_frame = tk.Frame(launcher_panel, bg=CLR_BG, padx=pad_x, pady=pad_y)
+        mkt_frame.pack(fill="x")
+        tk.Label(mkt_frame, text="Markets (Togglable):", bg=CLR_BG, fg=CLR_SUBTEXT,
+                 font=bold(), anchor="w").pack(fill="x")
+
+        mkt_btns = {}
+
+        def _update_run_btn(*_):
+            any_on = any(v.get() for v in market_vars.values())
+            run_btn.config(state="normal" if any_on else "disabled",
+                           bg=CLR_ACCENT if any_on else "#AAAAAA")
+
+        for mkt, var in market_vars.items():
+            clr  = MARKET_COLOURS_UI[mkt]
+            lbl  = MARKET_LABELS[mkt]
+
+            row = tk.Frame(mkt_frame, bg=CLR_BG)
+            row.pack(fill="x", pady=max(1, fs // 6))
+
+            def _make_mkt_toggle(v=var, m=mkt, c=clr):
+                def _toggle():
+                    v.set(not v.get())
+                    on = v.get()
+                    mkt_btns[m].config(
+                        text="☑" if on else "☐",
+                        fg=c      if on else "#AAAAAA",
+                    )
+                    _update_run_btn()
+                return _toggle
+
+            on  = var.get()
+            chk = tk.Button(row, text="☑" if on else "☐",
+                            font=tick_f(),
+                            fg=clr if on else "#AAAAAA",
+                            bg=CLR_BG, activebackground=CLR_BG,
+                            relief="flat", bd=0, cursor="hand2",
+                            command=_make_mkt_toggle())
+            chk.pack(side="left")
+            mkt_btns[mkt] = chk
+            tk.Label(row, text=lbl, bg=CLR_BG, fg=CLR_TEXT,
+                     font=bold()).pack(side="left")
+
+        tk.Frame(launcher_panel, bg="#DDDDDD", height=1).pack(fill="x", padx=pad_x, pady=(max(4, fs // 3), 0))
+
+        opt_frame = tk.Frame(launcher_panel, bg=CLR_BG, padx=pad_x, pady=pad_y)
         opt_frame.pack(fill="x")
 
         # Top N
         top_row = tk.Frame(opt_frame, bg=CLR_BG)
-        top_row.pack(fill="x", pady=3)
+        top_row.pack(fill="x", pady=max(1, fs // 6))
         tk.Label(top_row, text="Top N per market:", bg=CLR_BG,
                  fg=CLR_TEXT, font=bold()).pack(side="left")
         tk.Entry(top_row, textvariable=top_n_var, font=mono(), width=6,
@@ -398,39 +475,56 @@ def launch():
         tk.Label(top_row, text="(saved to preferences)",
                  bg=CLR_BG, fg=CLR_SUBTEXT, font=mono()).pack(side="left")
 
-        _make_toggle(opt_frame, "⚠  Force re-download prices (ignores cache)", force_dl_var)
+        _make_toggle(opt_frame, "Download latest prices",                     download_var)
+        _make_toggle(opt_frame, "Force recompute momentum signals",           force_signals_var)
         _make_toggle(opt_frame, "Refresh ticker lists (ignore weekly cache)", tickers_var)
-        _make_toggle(opt_frame, "Export results to CSV after run", export_var)
+        _make_toggle(opt_frame, "Export results to CSV after run",            export_var)
 
-        # Data age warning
-        age = cache_data_age_days()
-        age_frame = tk.Frame(launcher_panel, bg=CLR_BG, padx=24)
+        # Cache age info
+        age_frame = tk.Frame(launcher_panel, bg=CLR_BG, padx=pad_x)
         age_frame.pack(fill="x")
-        if age is None:
-            txt, clr = "⚠  No cached price data — first run will download.", CLR_WARN
-        elif age == 0:
-            txt, clr = "✓  Price data last updated today.", "#1A7A3A"
-        elif age == 1:
-            txt, clr = "✓  Price data last updated yesterday.", "#1A7A3A"
+
+        price_age   = cache_data_age_days()
+        signals_age = cache_signals_age_days()
+
+        if price_age is None:
+            p_txt, p_clr = "⚠  No cached price data — tick 'Download latest prices' before first run.", CLR_WARN
+        elif price_age == 0:
+            p_txt, p_clr = "✓  Price data last downloaded today.", "#1A7A3A"
+        elif price_age == 1:
+            p_txt, p_clr = "✓  Price data last downloaded yesterday.", "#1A7A3A"
         else:
-            txt = f"⚠  Price data is {age} days old.  Tick the box above to refresh."
-            clr = CLR_WARN if age < 30 else "#CC3333"
-        tk.Label(age_frame, text=txt, bg=CLR_BG,
-                 fg=clr, font=bold()).pack(anchor="w", pady=(0, 6))
+            p_txt = f"ℹ  Price data last downloaded {price_age} days ago."
+            p_clr = CLR_SUBTEXT
 
-        tk.Frame(launcher_panel, bg="#DDDDDD", height=1).pack(fill="x", padx=24, pady=(0, 4))
+        if signals_age is None:
+            s_txt, s_clr = "⚠  No cached signals — tick 'Download latest prices' to run for the first time.", CLR_WARN
+        elif signals_age == 0:
+            s_txt, s_clr = "✓  Signals last computed today — Run will load instantly.", "#1A7A3A"
+        elif signals_age == 1:
+            s_txt, s_clr = "ℹ  Signals last computed yesterday.", CLR_SUBTEXT
+        else:
+            s_txt = f"ℹ  Signals last computed {signals_age} days ago."
+            s_clr = CLR_SUBTEXT if signals_age < 14 else CLR_WARN
 
-        btn_frame = tk.Frame(launcher_panel, bg=CLR_BG, padx=24, pady=10)
+        tk.Label(age_frame, text=p_txt, bg=CLR_BG, fg=p_clr, font=bold()).pack(anchor="w", pady=(0, max(1, fs // 6)))
+        tk.Label(age_frame, text=s_txt, bg=CLR_BG, fg=s_clr, font=bold()).pack(anchor="w", pady=(0, max(2, fs // 4)))
+
+        tk.Frame(launcher_panel, bg="#DDDDDD", height=1).pack(fill="x", padx=pad_x, pady=(0, max(2, fs // 6)))
+
+        btn_frame = tk.Frame(launcher_panel, bg=CLR_BG, padx=pad_x, pady=max(4, fs // 3))
         btn_frame.pack(fill="x")
-        cfg = dict(font=bold(), relief="flat", bd=0, padx=16, pady=8, cursor="hand2")
-        tk.Button(btn_frame, text="▶  Run Screener",
-                  bg=CLR_ACCENT, fg=CLR_BTN_FG,
-                  activebackground="#0082C8",
-                  command=_go, **cfg).pack(side="right")
+        cfg = dict(font=bold(), relief="flat", bd=0, padx=max(8, fs), pady=max(4, fs // 2), cursor="hand2")
+        run_btn = tk.Button(btn_frame, text="▶  Run Screener",
+                            bg=CLR_ACCENT, fg=CLR_BTN_FG,
+                            activebackground="#0082C8",
+                            command=_go, **cfg)
+        run_btn.pack(side="right")
         tk.Button(btn_frame, text="✕  Exit",
                   bg="#CC3333", fg=CLR_BTN_FG,
                   activebackground="#AA2222",
                   command=root.destroy, **cfg).pack(side="right", padx=(0, 8))
+        _update_run_btn()
 
     # ── Status panel (built once) ─────────────────────────────────────────
     _make_header(status_panel)
@@ -478,17 +572,44 @@ def launch():
         exit_btn.pack(side="right")
 
     def _switch_to_launcher():
+        results_panel.pack_forget()
         status_panel.pack_forget()
         status_sub_lbl.pack_forget()
         log_text.delete("1.0", "end")
         status_sub_var.set("Starting…")
-        force_dl_var.set(False)
+        download_var.set(False)
+        force_signals_var.set(False)
         tickers_var.set(False)
         export_var.set(config.get_bool("export_csv"))
+        try:
+            root.state("normal")
+        except tk.TclError:
+            try:
+                root.attributes("-zoomed", False)
+            except tk.TclError:
+                pass
+        _apply_launcher_size()
+        menubar_frame.pack_forget()
+        menubar_frame.pack(fill="x", side="top")
         _build_launcher()
         launcher_panel.pack(fill="both", expand=True)
 
     run_again_btn.config(command=_switch_to_launcher)
+
+    def _show_results_inline(res):
+        status_panel.pack_forget()
+        menubar_frame.pack_forget()
+        for w in results_panel.winfo_children():
+            w.destroy()
+        try:
+            root.state("zoomed")
+        except tk.TclError:
+            try:
+                root.attributes("-zoomed", True)
+            except tk.TclError:
+                pass
+        show_screener_table(res, parent_frame=results_panel, on_close=_switch_to_launcher)
+        results_panel.pack(fill="both", expand=True)
 
     def _on_prefs_saved():
         _make_fonts()
@@ -551,40 +672,69 @@ def launch():
             top_n = config.get_int("top_n") or 50
         config.set("top_n", top_n)
         config.set("export_csv", export_var.get())
+        selected_markets = [m for m, v in market_vars.items() if v.get()]
+        config.set_active_markets(selected_markets)
         _switch_to_status()
         threading.Thread(
             target=_run_screener,
-            args=(top_n, force_dl_var.get(), tickers_var.get(), export_var.get()),
+            args=(top_n, download_var.get(), force_signals_var.get(),
+                  tickers_var.get(), export_var.get(), selected_markets),
             daemon=True,
         ).start()
 
-    def _run_screener(top_n, force_prices, force_tickers, do_export):
+    def _run_screener(top_n, do_download, force_signals, force_tickers, do_export, selected_markets):
         try:
             _set_subtitle("Loading ticker lists…")
             _log("─" * 55)
             _log("STEP 1 — Ticker lists")
             _log("─" * 55)
             market_tickers = load_all_tickers(force_refresh=force_tickers, log=_log)
+            market_tickers = {m: t for m, t in market_tickers.items() if m in selected_markets}
             total = ticker_count(market_tickers)
-            _log(f"\n  Total universe: {total} tickers across {len(market_tickers)} markets")
+            _log(f"\n  Active markets: {', '.join(market_tickers.keys())}")
+            _log(f"  Total universe: {total} tickers across {len(market_tickers)} markets")
 
-            age = cache_data_age_days()
-            age_str = f"{age} days old" if age is not None else "no cache"
-            _set_subtitle(
-                f"Downloading prices ({total} tickers)…" if force_prices
-                else f"Loading from cache ({age_str})…"
-            )
+            # ── Fast path: load cached signals, skip download + recompute ──
+            if not do_download and not force_signals:
+                _log("\n" + "─" * 55)
+                _log("STEP 2 — Loading cached signals")
+                _log("─" * 55)
+                _set_subtitle("Loading cached signals…")
+                results = load_signals(market_tickers, top_n=top_n, log=_log)
+
+                if results:
+                    _last_results["data"] = results
+                    if do_export:
+                        _log("\n" + "─" * 55)
+                        _log("STEP 3 — Exporting CSV")
+                        _log("─" * 55)
+                        _do_export(results)
+                    _set_subtitle("Done — loading results…")
+                    _log("\n" + "─" * 55)
+                    _log(f"  ✓ Loaded cached signals (scored at {results['scored_at']})")
+                    _log("  Opening results table…")
+                    _log("─" * 55)
+                    root.after(0, lambda: run_again_btn.pack(side="left"))
+                    root.after(200, lambda: _show_results_inline(results))
+                    return
+                else:
+                    _log("  ⚠  No cached signals found — will download and compute.")
+                    do_download   = True
+                    force_signals = True
+
+            # ── Full path: download and/or recompute ───────────────────────
             _log("\n" + "─" * 55)
             _log("STEP 2 — Price data")
             _log("─" * 55)
-            if age is None:
-                _log("  ⚠  No cached data — downloading for first time…")
-            elif not force_prices:
-                _log(f"  ℹ  Using cached data ({age} days old). Tick 'Force re-download' to refresh.")
-            else:
-                _log("  ⚠  Force re-download requested.")
 
-            prices = download_prices(market_tickers, force_refresh=force_prices, log=_log)
+            if do_download:
+                _set_subtitle(f"Downloading prices ({total} tickers)…")
+                _log("  Downloading latest prices…")
+            else:
+                _set_subtitle("Loading prices from DB…")
+                _log("  Loading prices from local DB (no download requested)…")
+
+            prices = download_prices(market_tickers, force_refresh=do_download, log=_log)
             _log(f"\n  Price matrix: {prices.shape[1]} tickers × {prices.shape[0]} trading days")
 
             _set_subtitle("Computing momentum scores…")
@@ -614,7 +764,7 @@ def launch():
             _log("─" * 55)
 
             root.after(0, lambda: run_again_btn.pack(side="left"))
-            root.after(200, lambda: show_screener_table(results))
+            root.after(200, lambda: _show_results_inline(results))
 
         except Exception as e:
             import traceback

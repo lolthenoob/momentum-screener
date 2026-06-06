@@ -6,6 +6,13 @@ Interactive Tkinter results table for the momentum screener.
 Frozen left columns: Rank + Ticker only (never scroll horizontally).
 All other columns including Name scroll right with the data.
 Scrollable header row stays pinned above data, synced to xscroll.
+
+show_screener_table() can be called two ways:
+  1. parent_frame=<Frame>   — embeds the table directly into that frame
+                              (no Toplevel, no Win32 menu crash).
+                              on_close= callback is called when Close is pressed.
+  2. master=<Tk>            — legacy fallback: opens a plain Toplevel window
+                              (no -toolwindow, no special attributes).
 """
 
 import tkinter as tk
@@ -153,31 +160,52 @@ def _col_px(char_w: int, fs: int) -> int:
     return max(30, char_w * (fs - 2))
 
 
-# ── Main window ───────────────────────────────────────────────────────────────
+# ── Main entry point ──────────────────────────────────────────────────────────
 
-def show_screener_table(results: dict, title: str = "Momentum Screener — Results"):
-    root = tk.Tk()
-    root.title(title)
-    root.configure(bg=CLR_BG)
-    root.resizable(True, True)
+def show_screener_table(
+    results: dict,
+    title: str = "Momentum Screener — Results",
+    master=None,        # legacy: opens a Toplevel if parent_frame not given
+    parent_frame=None,  # preferred: embed table directly into this Frame
+    on_close=None,      # callback when Close button pressed (embedded mode)
+):
+    """
+    Render the results table.
 
-    try:
-        from ctypes import windll
-        windll.shcore.SetProcessDpiAwareness(1)
-    except Exception:
-        pass
+    Preferred usage (avoids Win32 Toplevel/menu crash):
+        show_screener_table(results, parent_frame=some_tk_frame, on_close=callback)
 
-    root.update_idletasks()
-    sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
-    if config.get_bool("auto_resize"):
-        scale = config.font_size() / 12
-        w = min(int(1700 * scale), sw - 60)
-        h = min(int(880  * scale), sh - 60)
+    Legacy usage (Toplevel window):
+        show_screener_table(results, master=root)
+    """
+    is_embedded = parent_frame is not None
+
+    if is_embedded:
+        root = parent_frame
     else:
-        w = min(config.get_int("table_w") or 1600, sw - 60)
-        h = min(config.get_int("table_h") or 860,  sh - 60)
-    root.geometry(f"{w}x{h}+30+30")
-    root.minsize(900, 450)
+        # Legacy Toplevel path — kept for any direct callers
+        if master is None:
+            master = tk._get_default_root()
+        root = tk.Toplevel(master)
+        root.title(title)
+        root.configure(bg=CLR_BG)
+        root.resizable(True, True)
+        try:
+            from ctypes import windll
+            windll.shcore.SetProcessDpiAwareness(1)
+        except Exception:
+            pass
+        root.update_idletasks()
+        sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+        if config.get_bool("auto_resize"):
+            scale = config.font_size() / 12
+            w = min(int(1700 * scale), sw - 60)
+            h = min(int(880  * scale), sh - 60)
+        else:
+            w = min(config.get_int("table_w") or 1600, sw - 60)
+            h = min(config.get_int("table_h") or 860,  sh - 60)
+        root.geometry(f"{w}x{h}+{(sw - w) // 2}+{(sh - h) // 2}")
+        root.minsize(900, 450)
 
     fs       = config.get_int("font_size") or 12
     mono     = tkfont.Font(family="Consolas", size=fs)
@@ -196,19 +224,62 @@ def show_screener_table(results: dict, title: str = "Momentum Screener — Resul
              bg=CLR_ACCENT, fg="#D0EEFF", font=hdr_sub).pack()
 
     # ── Notebook tabs ─────────────────────────────────────────────────────
-    notebook = ttk.Notebook(root)
-    notebook.pack(fill="both", expand=True, padx=8, pady=6)
-
-    tabs = {"Overall": results.get("overall", pd.DataFrame())}
+    # Pure-tk tab bar — replaces ttk.Notebook to avoid Win32 resize crash
+    tabs_data = {"Overall": results.get("overall", pd.DataFrame())}
     for market in ["US", "AU", "NZ", "SG"]:
         bm = results.get("by_market", {})
         if market in bm and not bm[market].empty:
-            tabs[market] = bm[market]
+            tabs_data[market] = bm[market]
 
-    for tab_name, df in tabs.items():
-        frame = tk.Frame(notebook, bg=CLR_BG)
-        notebook.add(frame, text=f"  {tab_name}  ")
-        _build_table(frame, df, mono, bold, fs)
+    tab_bar = tk.Frame(root, bg="#E8EDF4")
+    tab_bar.pack(fill="x", padx=8, pady=(6, 0))
+
+    content_area = tk.Frame(root, bg=CLR_BG)
+    content_area.pack(fill="both", expand=True, padx=8)
+
+    tab_frames  = {}
+    tab_buttons = {}
+    tab_built   = {}          # tracks whether _build_table has been called yet
+    _active_tab = {"name": None}
+
+    # Create the container frames now but DON'T build their contents yet.
+    # Content is built lazily on first switch — prevents creating thousands
+    # of widgets before the window is visible (Win32 message queue overflow → crash).
+    for tab_name in tabs_data:
+        f = tk.Frame(content_area, bg=CLR_BG)
+        tab_frames[tab_name] = f
+        tab_built[tab_name]  = False
+
+    def _switch_tab(name):
+        if _active_tab["name"] == name:
+            return
+        if _active_tab["name"] and _active_tab["name"] in tab_frames:
+            tab_frames[_active_tab["name"]].pack_forget()
+
+        # Build the table the first time this tab is shown
+        if not tab_built[name]:
+            _build_table(tab_frames[name], tabs_data[name], mono, bold, fs)
+            tab_built[name] = True
+
+        tab_frames[name].pack(fill="both", expand=True)
+        _active_tab["name"] = name
+        for n, btn in tab_buttons.items():
+            btn.config(bg=CLR_ACCENT if n == name else "#E8EDF4",
+                       fg="white"   if n == name else CLR_TEXT)
+
+    for tab_name in tabs_data:
+        btn = tk.Button(
+            tab_bar, text=f"  {tab_name}  ",
+            font=bold, relief="flat", bd=0,
+            bg="#E8EDF4", fg=CLR_TEXT,
+            activebackground=CLR_ACCENT, activeforeground="white",
+            padx=6, pady=6, cursor="hand2",
+            command=lambda n=tab_name: _switch_tab(n),
+        )
+        btn.pack(side="left")
+        tab_buttons[tab_name] = btn
+
+    _switch_tab(next(iter(tabs_data)))
 
     # ── Footer ────────────────────────────────────────────────────────────
     footer = tk.Frame(root, bg=CLR_BG, pady=5, padx=12)
@@ -216,11 +287,27 @@ def show_screener_table(results: dict, title: str = "Momentum Screener — Resul
     tk.Label(footer,
              text="Score = RAM · Exp Slope · 12-1M · 3M · Stoch · RSI · CCI · W%R · MA count  |  ATR & MA flags = raw info",
              bg=CLR_BG, fg=CLR_SUBTEXT, font=mono).pack(side="left")
-    tk.Button(footer, text="✕  Close", bg="#CC3333", fg="white",
-              font=bold, relief="flat", padx=12, pady=4,
-              cursor="hand2", command=root.destroy).pack(side="right")
 
-    root.mainloop()
+    def _new_scan():
+        if is_embedded:
+            for w in root.winfo_children():
+                w.destroy()
+            if on_close:
+                on_close()
+        else:
+            root.destroy()
+
+    def _exit_app():
+        w = root
+        while w.master:
+            w = w.master
+        w.destroy()
+
+    btn_cfg = dict(font=bold, relief="flat", padx=12, pady=4, cursor="hand2")
+    tk.Button(footer, text="✕  Exit",     bg="#CC3333", fg="white",
+              command=_exit_app, **btn_cfg).pack(side="right")
+    tk.Button(footer, text="↺  New Scan", bg="#00A4EF", fg="white",
+              command=_new_scan, **btn_cfg).pack(side="right", padx=(0, 6))
 
 
 # ── Table builder ─────────────────────────────────────────────────────────────
@@ -232,9 +319,14 @@ def _build_table(parent: tk.Frame, df: pd.DataFrame, mono, bold, fs: int):
         return
 
     df = df.reset_index()
+    # reset_index() moves the ticker index to a column; normalise to "symbol"
+    if "symbol" not in df.columns:
+        candidate = next(
+            (c for c in df.columns if c not in ("index",) or c == df.columns[0]),
+            df.columns[0],
+        )
+        df = df.rename(columns={candidate: "symbol"})
     df.insert(0, "rank", range(1, len(df) + 1))
-    if "symbol" not in df.columns and "index" in df.columns:
-        df = df.rename(columns={"index": "symbol"})
     if "name" not in df.columns:
         df["name"] = ""
 
@@ -244,22 +336,13 @@ def _build_table(parent: tk.Frame, df: pd.DataFrame, mono, bold, fs: int):
         return _col_px(col_widths[col_idx], fs)
 
     row_h = fs + max(6, fs // 2)
-    hdr_h = fs + max(8, fs // 2) + max(4, fs // 3) * 2   # approximate header button height
+    hdr_h = fs + max(8, fs // 2) + max(4, fs // 3) * 2
 
     # ─────────────────────────────────────────────────────────────────────
-    # Layout (all packed into `outer`):
-    #
+    # Layout:
     #   [v_scroll on right]
     #   [h_scroll on bottom]
     #   [frozen_pane | divider | scroll_pane]
-    #
-    # frozen_pane (side="left", fill="y"):
-    #   frozen_hdr   ← plain Frame, always visible, no scroll
-    #   frozen_canvas← vertical scroll only
-    #
-    # scroll_pane (side="left", fill="both", expand=True):
-    #   scroll_hdr   ← plain Frame, clips to viewport width, shifted via place
-    #   scroll_canvas← vertical + horizontal scroll
     # ─────────────────────────────────────────────────────────────────────
 
     outer = tk.Frame(parent, bg=CLR_BG)
@@ -272,10 +355,13 @@ def _build_table(parent: tk.Frame, df: pd.DataFrame, mono, bold, fs: int):
     h_scroll.pack(side="bottom", fill="x")
 
     # ── Frozen pane ───────────────────────────────────────────────────────
-    frozen_pane = tk.Frame(outer, bg=CLR_HDR_BG)
+    # Calculate exact pixel width of all frozen columns so the pane doesn't
+    # expand beyond its content (which creates the visible gap before Name).
+    frozen_pane_w = sum(px(COLUMNS.index(c)) for c in FROZEN_COLS)
+    frozen_pane = tk.Frame(outer, bg=CLR_HDR_BG, width=frozen_pane_w)
     frozen_pane.pack(side="left", fill="y")
+    frozen_pane.pack_propagate(False)
 
-    # Fixed-height frozen header (exact height set after fonts known)
     frozen_hdr = tk.Frame(frozen_pane, bg=CLR_HDR_BG, height=hdr_h)
     frozen_hdr.pack(side="top", fill="x")
     frozen_hdr.pack_propagate(False)
@@ -291,18 +377,15 @@ def _build_table(parent: tk.Frame, df: pd.DataFrame, mono, bold, fs: int):
         frozen_canvas.configure(scrollregion=frozen_canvas.bbox("all"))
     frozen_inner.bind("<Configure>", _frozen_inner_resize)
 
-    # Thin divider between panes
     tk.Frame(outer, bg="#444466", width=2).pack(side="left", fill="y")
 
     # ── Scroll pane ───────────────────────────────────────────────────────
     scroll_pane = tk.Frame(outer, bg=CLR_BG)
     scroll_pane.pack(side="left", fill="both", expand=True)
 
-    # Scroll header: a viewport Frame that clips its child.
-    # Child (scroll_hdr_inner) is wider than the viewport and shifted via place().
     scroll_hdr_vp = tk.Frame(scroll_pane, bg=CLR_HDR_BG, height=hdr_h)
     scroll_hdr_vp.pack(side="top", fill="x")
-    scroll_hdr_vp.pack_propagate(False)   # must not grow to child width
+    scroll_hdr_vp.pack_propagate(False)
 
     scroll_hdr_inner = tk.Frame(scroll_hdr_vp, bg=CLR_HDR_BG)
     scroll_hdr_inner.place(x=0, y=0, height=hdr_h)
@@ -332,7 +415,6 @@ def _build_table(parent: tk.Frame, df: pd.DataFrame, mono, bold, fs: int):
 
     def _xview(*args):
         scroll_canvas.xview(*args)
-        # Shift the header inner frame to match data canvas x position
         try:
             frac   = scroll_canvas.xview()[0]
             total  = scroll_inner.winfo_reqwidth()
@@ -417,21 +499,22 @@ def _build_table(parent: tk.Frame, df: pd.DataFrame, mono, bold, fs: int):
         handle.bind("<ButtonPress-1>", _start)
         handle.bind("<B1-Motion>",     _drag)
 
-    # Build frozen header cells
     for col in FROZEN_COLS:
         _make_hdr_cell(frozen_hdr, col, COLUMNS.index(col))
 
-    # Build scroll header cells
     for col in SCROLL_COLS:
         _make_hdr_cell(scroll_hdr_inner, col, COLUMNS.index(col))
 
-    # After header cells are packed, fix the actual rendered height
-    frozen_hdr.update_idletasks()
-    real_hdr_h = frozen_hdr.winfo_reqheight()
-    if real_hdr_h > 0:
-        frozen_hdr.configure(height=real_hdr_h)
-        scroll_hdr_vp.configure(height=real_hdr_h)
-        scroll_hdr_inner.place_configure(height=real_hdr_h)
+    def _place_scroll_hdr(*_):
+        frozen_hdr.update_idletasks()
+        real_hdr_h = frozen_hdr.winfo_reqheight()
+        if real_hdr_h > 0:
+            frozen_hdr.configure(height=real_hdr_h)
+            scroll_hdr_vp.configure(height=real_hdr_h)
+            scroll_hdr_inner.place_configure(height=real_hdr_h)
+
+    frozen_hdr.bind("<Configure>", _place_scroll_hdr)
+    frozen_hdr.after_idle(_place_scroll_hdr)
 
     # ── Data cell factory ─────────────────────────────────────────────────
     def _make_cell(parent, field, val, col_idx, bg_def, row):
@@ -502,9 +585,14 @@ def _build_table(parent: tk.Frame, df: pd.DataFrame, mono, bold, fs: int):
             for col in SCROLL_COLS:
                 _make_cell(srf, col[1], row.get(col[1]), COLUMNS.index(col), bg, row)
 
-        frozen_canvas.update_idletasks()
-        frozen_canvas.configure(scrollregion=frozen_canvas.bbox("all"))
-        scroll_canvas.update_idletasks()
-        scroll_canvas.configure(scrollregion=scroll_canvas.bbox("all"))
+        # Defer geometry updates so the window event loop stays responsive.
+        # Calling update_idletasks() inline blocks the main thread while
+        # Win32 processes thousands of pending widget messages → freeze/crash.
+        frozen_canvas.after_idle(
+            lambda: frozen_canvas.configure(scrollregion=frozen_canvas.bbox("all"))
+        )
+        scroll_canvas.after_idle(
+            lambda: scroll_canvas.configure(scrollregion=scroll_canvas.bbox("all"))
+        )
 
     _render(df.sort_values("momentum_score", ascending=False, na_position="last"))

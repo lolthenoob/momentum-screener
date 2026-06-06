@@ -21,6 +21,7 @@ DEFAULTS = {
     "launcher_h":       "580",
     "table_w":          "1600",
     "table_h":          "860",
+    "active_markets":   "US,AU,NZ,SG",
 }
 
 
@@ -88,3 +89,14 @@ def save_col_widths(widths: list):
 def clear_col_widths():
     """Call after font size change so columns auto-resize to new font."""
     set("col_widths", "")
+
+
+def get_active_markets() -> list[str]:
+    raw = get("active_markets").strip()
+    if not raw:
+        return ["US", "AU", "NZ", "SG"]
+    return [m.strip().upper() for m in raw.split(",") if m.strip()]
+
+
+def set_active_markets(markets: list[str]):
+    set("active_markets", ",".join(markets))

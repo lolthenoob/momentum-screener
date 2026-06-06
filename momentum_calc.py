@@ -18,10 +18,16 @@ Composite score (9 signals, rank-normalised 0–100, equally weighted):
 Raw columns (informational, not in composite):
   · ATR (15)                 — average true range, volatility context
   · MA25/50/100/200          — ✓ / ✗ flags
+
+Signal cache:
+  Scored results are persisted to momentum.db after every compute.
+  On subsequent runs (no download, no force-recompute) the cached
+  signals are loaded directly — no price processing required.
 """
 
 import os
 import sqlite3
+import json
 from datetime import datetime, timedelta
 import warnings
 
@@ -36,12 +42,19 @@ import yfinance as yf
 _BASE       = os.path.dirname(os.path.abspath(__file__))
 DB_PATH     = os.path.join(_BASE, "data", "momentum.db")
 BATCH_SZ    = 100
-PERIOD      = "2y"          # bumped to 2y — MA200 + regression need more history
+PERIOD      = "2y"
 TOP_N       = 50
-STALE_HOURS = 20
 
-EXP_REG_LEN = 90            # bars for exponential regression
+EXP_REG_LEN = 90
 DAYS_IN_YR  = 252
+
+# Signal cache column list — must match _compute_signals output exactly
+_SIGNAL_COLS = [
+    "price", "ram_raw", "ram_score", "exp_slope", "ret_12_1", "ret_3m",
+    "stoch_k", "stoch_d", "rsi", "cci", "wpr", "atr", "ma_score",
+    "above_ma25", "above_ma50", "above_ma100", "above_ma200",
+    "market", "momentum_score", "name",
+]
 
 
 # ── DB setup ──────────────────────────────────────────────────────────────────
@@ -61,20 +74,38 @@ def _get_db() -> sqlite3.Connection:
             fetched_at  TEXT NOT NULL,
             rows_stored INTEGER DEFAULT 0
         );
+        CREATE TABLE IF NOT EXISTS signal_cache (
+            symbol      TEXT PRIMARY KEY,
+            data_json   TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS signal_log (
+            id          INTEGER PRIMARY KEY CHECK (id = 1),
+            scored_at   TEXT NOT NULL,
+            top_n       INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS name_cache (
+            symbol      TEXT PRIMARY KEY,
+            name        TEXT NOT NULL DEFAULT '',
+            fetched_at  TEXT NOT NULL
+        );
     """)
     conn.commit()
     return conn
 
 
+# ── Price cache helpers ───────────────────────────────────────────────────────
+
 def _stale_tickers(conn: sqlite3.Connection, tickers: list[str]) -> list[str]:
-    cutoff = (datetime.now() - timedelta(hours=STALE_HOURS)).isoformat()
+    """Return tickers that have never been fetched (no entry in fetch_log at all)."""
+    if not tickers:
+        return []
     rows = conn.execute(
-        "SELECT symbol, fetched_at FROM fetch_log WHERE symbol IN ({})".format(
+        "SELECT symbol FROM fetch_log WHERE symbol IN ({})".format(
             ",".join("?" * len(tickers))
         ), tickers
     ).fetchall()
-    fresh = {r[0] for r in rows if r[1] >= cutoff}
-    return [t for t in tickers if t not in fresh]
+    fetched = {r[0] for r in rows}
+    return [t for t in tickers if t not in fetched]
 
 
 def _store_prices(conn: sqlite3.Connection, data: pd.DataFrame, tickers: list[str]):
@@ -145,6 +176,147 @@ def _load_prices(conn: sqlite3.Connection, tickers: list[str]) -> pd.DataFrame:
     return pivot
 
 
+# ── Signal cache helpers ──────────────────────────────────────────────────────
+
+def save_signals(results: dict):
+    """Persist the scored results dict to signal_cache and signal_log tables."""
+    try:
+        conn = _get_db()
+
+        # Combine overall into a single DataFrame keyed by symbol
+        overall = results.get("overall")
+        by_market = results.get("by_market", {})
+        scored_at = results.get("scored_at", datetime.now().isoformat(timespec="seconds"))
+        top_n = len(overall) if overall is not None else 0
+
+        # Build a full universe DataFrame from all market results
+        frames = []
+        if overall is not None and not overall.empty:
+            frames.append(overall)
+        for mdf in by_market.values():
+            if mdf is not None and not mdf.empty:
+                frames.append(mdf)
+
+        if not frames:
+            conn.close()
+            return
+
+        combined = pd.concat(frames)
+        combined = combined[~combined.index.duplicated(keep="first")]
+
+        rows = []
+        for sym, row in combined.iterrows():
+            d = {}
+            for col in _SIGNAL_COLS:
+                val = row.get(col)
+                if val is None or (isinstance(val, float) and np.isnan(val)):
+                    d[col] = None
+                else:
+                    d[col] = val
+            rows.append((sym, json.dumps(d)))
+
+        conn.execute("DELETE FROM signal_cache")
+        conn.executemany(
+            "INSERT INTO signal_cache (symbol, data_json) VALUES (?, ?)", rows
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO signal_log (id, scored_at, top_n) VALUES (1, ?, ?)",
+            (scored_at, top_n)
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"  ⚠  signal cache save failed: {e}")
+
+
+def load_signals(market_tickers: dict, top_n: int = TOP_N, log=None) -> dict | None:
+    """
+    Load previously scored results from signal_cache.
+    Returns None if cache is empty or missing.
+    """
+    try:
+        conn = _get_db()
+
+        log_row = conn.execute(
+            "SELECT scored_at, top_n FROM signal_log WHERE id = 1"
+        ).fetchone()
+        if not log_row:
+            conn.close()
+            return None
+
+        scored_at = log_row[0]
+        rows = conn.execute(
+            "SELECT symbol, data_json FROM signal_cache"
+        ).fetchall()
+        conn.close()
+
+        if not rows:
+            return None
+
+        records = []
+        for sym, data_json in rows:
+            d = json.loads(data_json)
+            d["symbol"] = sym
+            records.append(d)
+
+        df = pd.DataFrame(records).set_index("symbol")
+
+        # Rebuild numeric columns
+        for col in _SIGNAL_COLS:
+            if col in df.columns and col not in ("market", "name"):
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        if "momentum_score" not in df.columns or df.empty:
+            return None
+
+        ticker_to_market = {
+            t: market
+            for market, tickers in market_tickers.items()
+            for t in tickers
+        }
+        if "market" not in df.columns or df["market"].isna().all():
+            df["market"] = df.index.map(lambda s: ticker_to_market.get(s, "?"))
+
+        df = df.sort_values("momentum_score", ascending=False, na_position="last")
+        overall = df.dropna(subset=["momentum_score"]).head(top_n).copy()
+
+        by_market = {}
+        for market in market_tickers:
+            mdf = df[df["market"] == market].dropna(subset=["momentum_score"])
+            by_market[market] = mdf.head(top_n).copy()
+            _log(log, f"  {market:<3} — {len(mdf)} cached signals, top {min(top_n, len(mdf))} kept")
+
+        _log(log, f"  Overall top {len(overall)} loaded from cache")
+
+        return {
+            "overall":   overall,
+            "by_market": by_market,
+            "scored_at": scored_at,
+        }
+
+    except Exception as e:
+        print(f"  ⚠  signal cache load failed: {e}")
+        return None
+
+
+def signal_cache_info() -> tuple[str | None, int | None]:
+    """
+    Returns (scored_at_isostring, top_n) from signal_log, or (None, None).
+    scored_at is an ISO timestamp string.
+    """
+    try:
+        conn = _get_db()
+        row = conn.execute(
+            "SELECT scored_at, top_n FROM signal_log WHERE id = 1"
+        ).fetchone()
+        conn.close()
+        if row:
+            return row[0], row[1]
+        return None, None
+    except Exception:
+        return None, None
+
+
 # ── Download ──────────────────────────────────────────────────────────────────
 
 def download_prices(
@@ -155,6 +327,8 @@ def download_prices(
     conn = _get_db()
     all_tickers = [t for tickers in market_tickers.values() for t in tickers]
 
+    # Only fetch tickers that have never been downloaded.
+    # force_refresh downloads everything regardless.
     to_fetch = all_tickers if force_refresh else _stale_tickers(conn, all_tickers)
 
     if to_fetch:
@@ -206,7 +380,6 @@ def _rsi(s: pd.Series, period: int = 14) -> float | None:
 
 
 def _stochastic(s: pd.Series, period: int = 14) -> tuple[float | None, float | None]:
-    """Return (%K, %D) for last bar."""
     s = s.dropna()
     if len(s) < period + 3:
         return None, None
@@ -223,15 +396,14 @@ def _stochastic(s: pd.Series, period: int = 14) -> tuple[float | None, float | N
 
 
 def _cci(s: pd.Series, period: int = 14) -> float | None:
-    """CCI using close-only (typical price = close when OHLC unavailable)."""
     s = s.dropna()
     if len(s) < period:
         return None
-    tp     = s                          # close-only approximation
-    ma     = tp.rolling(period).mean()
-    md     = tp.rolling(period).apply(lambda x: np.mean(np.abs(x - x.mean())), raw=True)
-    cci    = (tp - ma) / (0.015 * md.replace(0, np.nan))
-    val    = cci.iloc[-1]
+    tp  = s
+    ma  = tp.rolling(period).mean()
+    md  = tp.rolling(period).apply(lambda x: np.mean(np.abs(x - x.mean())), raw=True)
+    cci = (tp - ma) / (0.015 * md.replace(0, np.nan))
+    val = cci.iloc[-1]
     return float(val) if not np.isnan(val) else None
 
 
@@ -247,7 +419,6 @@ def _williams_r(s: pd.Series, period: int = 14) -> float | None:
 
 
 def _atr(s: pd.Series, period: int = 15) -> float | None:
-    """ATR from close-only (true range = |close[t] - close[t-1]|)."""
     s = s.dropna()
     if len(s) < period + 1:
         return None
@@ -259,7 +430,6 @@ def _atr(s: pd.Series, period: int = 15) -> float | None:
 def _ma_val(s: pd.Series, window: int) -> float | None:
     s = s.dropna()
     if len(s) < window:
-        # Use available data if at least 60% of window present
         if len(s) >= max(10, int(window * 0.6)):
             return float(s.mean())
         return None
@@ -267,26 +437,19 @@ def _ma_val(s: pd.Series, window: int) -> float | None:
 
 
 def _exp_reg_slope(s: pd.Series, length: int = EXP_REG_LEN) -> float | None:
-    """
-    Annualised exponential regression slope × R²  (Pine Script port).
-    Returns value as a decimal (e.g. 0.25 = 25% annualised growth).
-    """
     s = s.dropna()
     if len(s) < length:
         return None
     window = s.iloc[-length:].values
     nl     = np.log(window)
     x      = np.arange(length, dtype=float)
-    # OLS slope of log(price) on bar index
     x_m    = x.mean();  y_m = nl.mean()
     x_std  = x.std();   y_std = nl.std()
     if x_std == 0 or y_std == 0:
         return None
     corr   = np.corrcoef(x, nl)[0, 1]
     slope  = corr * (y_std / x_std)
-    # Annualise
     ann    = (np.exp(slope) ** DAYS_IN_YR - 1)
-    # R² of log(price) vs cumulative bar index
     cum_x  = np.arange(1, length + 1, dtype=float)
     r2     = np.corrcoef(cum_x, nl)[0, 1] ** 2
     result = ann * r2
@@ -294,28 +457,18 @@ def _exp_reg_slope(s: pd.Series, length: int = EXP_REG_LEN) -> float | None:
 
 
 def _risk_adj_momentum(s: pd.Series) -> float | None:
-    """
-    Mom's function — risk-adjusted momentum score.
-    12-1M return ÷ annualised vol, z-scored (but z-score needs the full
-    cross-section, so here we just return the raw ratio; z-scoring happens
-    at the DataFrame level in _compute_signals).
-    """
     s = s.dropna()
     if len(s) < 252:
         return None
-    momentum = float(s.iloc[-21] / s.iloc[-252] - 1)
+    momentum  = float(s.iloc[-21] / s.iloc[-252] - 1)
     daily_ret = s.pct_change().dropna()
-    vol = float(daily_ret.iloc[-252:].std() * np.sqrt(252))
+    vol       = float(daily_ret.iloc[-252:].std() * np.sqrt(252))
     if vol == 0:
         return None
     return momentum / vol
 
 
 def _apply_ram_score(series: pd.Series) -> pd.Series:
-    """
-    Apply mom's z-score + winsorise + asymmetric mapping to a cross-section
-    of raw risk-adjusted momentum values.
-    """
     mean = series.mean()
     std  = series.std()
     if std == 0:
@@ -329,7 +482,75 @@ def _apply_ram_score(series: pd.Series) -> pd.Series:
     return score
 
 
-# ── Main signal computation ───────────────────────────────────────────────────
+# ── Name cache helpers ────────────────────────────────────────────────────────
+
+def _load_names(conn: sqlite3.Connection, tickers: list[str]) -> dict[str, str]:
+    """Read names from name_cache for the given tickers. Returns {symbol: name}."""
+    if not tickers:
+        return {}
+    rows = conn.execute(
+        "SELECT symbol, name FROM name_cache WHERE symbol IN ({})".format(
+            ",".join("?" * len(tickers))
+        ), tickers
+    ).fetchall()
+    return {sym: name for sym, name in rows}
+
+
+def _store_names(conn: sqlite3.Connection, names: dict[str, str]):
+    """Write {symbol: name} dict into name_cache, upserting existing rows."""
+    if not names:
+        return
+    now = datetime.now().isoformat(timespec="seconds")
+    conn.executemany(
+        "INSERT OR REPLACE INTO name_cache (symbol, name, fetched_at) VALUES (?, ?, ?)",
+        [(sym, name or "", now) for sym, name in names.items()],
+    )
+    conn.commit()
+
+
+# ── Name lookup ───────────────────────────────────────────────────────────────
+
+def _fetch_names(tickers: list[str], log=None) -> dict[str, str]:
+    """
+    Fetch longName for each ticker via yfinance, storing results in name_cache.
+    On subsequent calls, cached names are returned immediately — no network call.
+    Only tickers missing from the cache hit the network.
+    """
+    if not tickers:
+        return {}
+
+    conn = _get_db()
+    cached = _load_names(conn, tickers)
+    missing = [t for t in tickers if t not in cached]
+
+    if missing:
+        _log(log, f"  Fetching names for {len(missing)} tickers "
+                  f"({len(cached)} already cached)…")
+        fetched = {}
+        total = len(missing)
+        for i, sym in enumerate(missing):
+            try:
+                info = yf.Ticker(sym).fast_info
+                name = getattr(info, "long_name", None)
+                if not name:
+                    full = yf.Ticker(sym).info
+                    name = full.get("longName") or full.get("shortName") or ""
+                fetched[sym] = name or ""
+            except Exception:
+                fetched[sym] = ""
+            if (i + 1) % 10 == 0 or (i + 1) == total:
+                _log(log, f"  Names: {i + 1}/{total}")
+
+        _store_names(conn, fetched)
+        cached.update(fetched)
+    else:
+        _log(log, f"  Names: all {len(tickers)} loaded from cache")
+
+    conn.close()
+    return {t: cached.get(t, "") for t in tickers}
+
+
+
 
 def _compute_signals(prices: pd.DataFrame) -> pd.DataFrame:
     records = []
@@ -340,26 +561,19 @@ def _compute_signals(prices: pd.DataFrame) -> pd.DataFrame:
 
         price = float(col.iloc[-1])
 
-        # Returns
         ret_12_1 = None
         if len(col) >= 252:
             ret_12_1 = float(col.iloc[-21] / col.iloc[-252] - 1)
         ret_3m = _safe_ret(col, 63)
 
-        # Oscillators
-        rsi_val  = _rsi(col, 14)
+        rsi_val         = _rsi(col, 14)
         stoch_k, stoch_d = _stochastic(col, 14)
-        cci_val  = _cci(col, 14)
-        wpr_val  = _williams_r(col, 14)
-        atr_val  = _atr(col, 15)
+        cci_val         = _cci(col, 14)
+        wpr_val         = _williams_r(col, 14)
+        atr_val         = _atr(col, 15)
+        exp_slope       = _exp_reg_slope(col, EXP_REG_LEN)
+        ram_raw         = _risk_adj_momentum(col)
 
-        # Exp regression slope × R²
-        exp_slope = _exp_reg_slope(col, EXP_REG_LEN)
-
-        # Raw risk-adjusted momentum ratio (z-scored cross-sectionally later)
-        ram_raw  = _risk_adj_momentum(col)
-
-        # MA levels
         ma25  = _ma_val(col, 25)
         ma50  = _ma_val(col, 50)
         ma100 = _ma_val(col, 100)
@@ -370,14 +584,12 @@ def _compute_signals(prices: pd.DataFrame) -> pd.DataFrame:
         above_ma100 = int(price > ma100) if ma100 else None
         above_ma200 = int(price > ma200) if ma200 else None
 
-        # MA score = count of MAs price is above (0–4), used in composite
         ma_flags = [above_ma25, above_ma50, above_ma100, above_ma200]
         ma_score = sum(f for f in ma_flags if f is not None)
 
         records.append({
             "symbol":       sym,
             "price":        price,
-            # composite inputs
             "ram_raw":      ram_raw,
             "exp_slope":    exp_slope,
             "ret_12_1":     ret_12_1,
@@ -387,7 +599,6 @@ def _compute_signals(prices: pd.DataFrame) -> pd.DataFrame:
             "cci":          cci_val,
             "wpr":          wpr_val,
             "ma_score":     float(ma_score),
-            # raw info columns
             "stoch_d":      stoch_d,
             "atr":          atr_val,
             "above_ma25":   above_ma25,
@@ -398,7 +609,6 @@ def _compute_signals(prices: pd.DataFrame) -> pd.DataFrame:
 
     df = pd.DataFrame(records).set_index("symbol")
 
-    # Apply cross-sectional RAM score (needs full universe)
     if "ram_raw" in df.columns:
         raw = df["ram_raw"].dropna()
         if not raw.empty:
@@ -412,14 +622,12 @@ def _compute_signals(prices: pd.DataFrame) -> pd.DataFrame:
 # ── Rank-normalise + composite ────────────────────────────────────────────────
 
 def _rank_norm(series: pd.Series) -> pd.Series:
-    """Rank-normalise to 0–100 across the available universe."""
     s = series.dropna()
     if s.empty:
         return pd.Series(dtype=float)
     return s.rank(pct=True) * 100
 
 
-# Williams %R is inverted (less negative = more bullish), so we flip it
 def _rank_norm_inv(series: pd.Series) -> pd.Series:
     return _rank_norm(-series)
 
@@ -432,7 +640,7 @@ COMPOSITE_SIGNALS = [
     ("stoch_k",    _rank_norm),
     ("rsi",        _rank_norm),
     ("cci",        _rank_norm),
-    ("wpr",        _rank_norm_inv),   # Williams %R: higher (less negative) = bullish
+    ("wpr",        _rank_norm_inv),
     ("ma_score",   _rank_norm),
 ]
 
@@ -444,27 +652,33 @@ def _score(df: pd.DataFrame) -> pd.DataFrame:
             rk_col = f"rank_{col}"
             df[rk_col] = fn(df[col])
             rank_cols.append(rk_col)
-
     df["momentum_score"] = df[rank_cols].mean(axis=1)
     return df.sort_values("momentum_score", ascending=False)
 
 
-# ── Cache age helper ─────────────────────────────────────────────────────────
+# ── Cache age helpers ─────────────────────────────────────────────────────────
 
 def cache_data_age_days() -> int | None:
-    """
-    Returns how many days ago the most recent price fetch was,
-    or None if no cache exists yet.
-    """
+    """Days since most recent price fetch, or None if no cache."""
     try:
         conn = _get_db()
-        row  = conn.execute(
-            "SELECT MAX(fetched_at) FROM fetch_log"
-        ).fetchone()
+        row  = conn.execute("SELECT MAX(fetched_at) FROM fetch_log").fetchone()
         conn.close()
         if not row or not row[0]:
             return None
         last = datetime.fromisoformat(row[0])
+        return (datetime.now() - last).days
+    except Exception:
+        return None
+
+
+def cache_signals_age_days() -> int | None:
+    """Days since signals were last scored, or None if no signal cache."""
+    try:
+        scored_at, _ = signal_cache_info()
+        if not scored_at:
+            return None
+        last = datetime.fromisoformat(scored_at)
         return (datetime.now() - last).days
     except Exception:
         return None
@@ -504,11 +718,28 @@ def run_screener(
 
     _log(log, f"  Overall top {len(overall)} computed")
 
-    return {
+    # Fetch display names for every ticker that appears in any result set
+    all_result_syms = list(
+        dict.fromkeys(
+            list(overall.index)
+            + [s for mdf in by_market.values() for s in mdf.index]
+        )
+    )
+    names = _fetch_names(all_result_syms, log=log)
+    overall["name"] = overall.index.map(lambda s: names.get(s, ""))
+    for market in by_market:
+        by_market[market]["name"] = by_market[market].index.map(lambda s: names.get(s, ""))
+
+    results = {
         "overall":   overall,
         "by_market": by_market,
         "scored_at": datetime.now().isoformat(timespec="seconds"),
     }
+
+    # Always persist signals after computing
+    save_signals(results)
+
+    return results
 
 
 def _log(log_fn, msg: str, end: str = "\n"):
