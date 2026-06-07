@@ -297,7 +297,7 @@ def save_signals(results: dict):
         print(f"  ⚠  signal cache save failed: {e}")
 
 
-def load_signals(market_tickers: dict, top_n: int = TOP_N, log=None) -> dict | None:
+def load_signals(market_tickers: dict, top_n: int = TOP_N, rank_mode: str = "normal", log=None) -> dict | None:
     """
     Load previously scored results from signal_cache.
     Returns None if cache is empty or missing.
@@ -351,11 +351,14 @@ def load_signals(market_tickers: dict, top_n: int = TOP_N, log=None) -> dict | N
         df = _attach_rank_change(df, conn, "weekly_score", "weekly_rank_change")
         conn.close()
 
-        overall = df.dropna(subset=["momentum_score"]).head(top_n).copy()
+        sort_col = "weekly_score" if rank_mode == "weekly" else "momentum_score"
+        ranked = df.sort_values(sort_col, ascending=False, na_position="last")
+
+        overall = ranked.dropna(subset=["momentum_score"]).head(top_n).copy()
 
         by_market = {}
         for market in market_tickers:
-            mdf = df[df["market"] == market].dropna(subset=["momentum_score"])
+            mdf = ranked[ranked["market"] == market].dropna(subset=["momentum_score"])
             by_market[market] = mdf.head(top_n).copy()
             _log(log, f"  {market:<3} — {len(mdf)} cached signals, top {min(top_n, len(mdf))} kept")
 
@@ -638,7 +641,7 @@ def _weekly_exp_slope(s: pd.Series, length: int = 10) -> float | None:
         return None
     corr   = np.corrcoef(x, nl)[0, 1]
     slope  = corr * (y_std / x_std)
-    ann    = (np.exp(slope) ** DAYS_IN_YR - 1)
+    ann    = (np.exp(slope) ** 5 - 1) #annualise 1 week instead
     r2     = np.corrcoef(np.arange(1, length + 1, dtype=float), nl)[0, 1] ** 2
     result = ann * r2
     return float(result) if np.isfinite(result) else None
@@ -1096,6 +1099,7 @@ def run_screener(
     prices: pd.DataFrame,
     top_n: int = TOP_N,
     min_turnovers: dict[str, float] | None = None,
+    rank_mode: str = "normal",
     log=None,
 ) -> dict:
     _log(log, "\n  Computing momentum signals…")
@@ -1141,11 +1145,14 @@ def run_screener(
     scored = _attach_rank_change(scored, conn, "weekly_score", "weekly_rank_change")
     conn.close()
 
-    overall = scored.dropna(subset=["momentum_score"]).head(top_n).copy()
+    sort_col = "weekly_score" if rank_mode == "weekly" else "momentum_score"
+    ranked = scored.sort_values(sort_col, ascending=False, na_position="last")
+
+    overall = ranked.dropna(subset=["momentum_score"]).head(top_n).copy()
 
     by_market = {}
     for market in market_tickers:
-        mdf = scored[scored["market"] == market].dropna(subset=["momentum_score"])
+        mdf = ranked[ranked["market"] == market].dropna(subset=["momentum_score"])
         by_market[market] = mdf.head(top_n).copy()
         _log(log, f"  {market:<3} — {len(mdf)} scored, top {min(top_n, len(mdf))} kept")
 

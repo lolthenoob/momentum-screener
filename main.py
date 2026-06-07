@@ -20,6 +20,7 @@ from momentum_calc  import (download_prices, run_screener,
                             load_signals, save_signals,
                             clear_price_cache, clear_signal_cache)
 from screener_table import show_screener_table
+from watchlist_picker import build_watchlist_panel
 
 # ── Colours ───────────────────────────────────────────────────────────────────
 CLR_ACCENT  = "#00A4EF"
@@ -527,7 +528,7 @@ def launch():
 
     def _apply_launcher_size():
         base_w = 900
-        base_h = 750
+        base_h = 800
 
         if config.get_bool("auto_resize"):
             fs    = config.font_size()
@@ -770,6 +771,11 @@ def launch():
     export_var         = tk.BooleanVar(value=config.get_bool("export_csv"))
     rank_mode_var      = tk.StringVar(value=config.get("rank_mode") or "normal")
 
+    # ── Watchlist vars (persistence only — picker owns download/export/rank) ──
+    watchlist_tickers_var   = tk.StringVar(value=config.get("watchlist_tickers") or "")
+    watchlist_rank_mode_var = tk.StringVar(value=config.get("watchlist_rank_mode") or "normal")
+    active_tab_var          = tk.StringVar(value="screener")
+
     _active = config.get_active_markets()
     market_vars = {
         "US": tk.BooleanVar(value="US" in _active),
@@ -781,17 +787,12 @@ def launch():
     MARKET_COLOURS_UI = {"US": "#00A4EF", "AU": "#10B981", "NZ": "#8B5CF6", "SG": "#F59E0B"}
 
     # ── Build launcher content ────────────────────────────────────────────
-    def _build_launcher():
-        for w in launcher_panel.winfo_children():
-            w.destroy()
-
-        _make_header(launcher_panel)
-
+    def _build_screener_pane(parent):
         fs = config.font_size()
         pad_x = max(12, fs * 2)
         pad_y = max(6,  fs // 2)
 
-        info_frame = tk.Frame(launcher_panel, bg=CLR_BG, padx=pad_x, pady=pad_y)
+        info_frame = tk.Frame(parent, bg=CLR_BG, padx=pad_x, pady=pad_y)
         info_frame.pack(fill="x")
 
         for label, val in [
@@ -807,10 +808,10 @@ def launch():
             tk.Label(row, text=val, font=mono(),
                      bg=CLR_BG, fg=CLR_TEXT, anchor="w").pack(side="left")
 
-        tk.Frame(launcher_panel, bg="#DDDDDD", height=1).pack(fill="x", padx=pad_x, pady=(max(4, fs // 3), 0))
+        tk.Frame(parent, bg="#DDDDDD", height=1).pack(fill="x", padx=pad_x, pady=(max(4, fs // 3), 0))
 
         # ── Market selector ───────────────────────────────────────────────
-        mkt_frame = tk.Frame(launcher_panel, bg=CLR_BG, padx=pad_x, pady=pad_y)
+        mkt_frame = tk.Frame(parent, bg=CLR_BG, padx=pad_x, pady=pad_y)
         mkt_frame.pack(fill="x")
 
         mkt_hdr_row = tk.Frame(mkt_frame, bg=CLR_BG)
@@ -827,7 +828,7 @@ def launch():
 
         def _toggle_all_markets():
             all_on = all(v.get() for v in market_vars.values())
-            new_state = not all_on      # if all on → turn all off, otherwise all on
+            new_state = not all_on
             for mkt, v in market_vars.items():
                 v.set(new_state)
                 clr = MARKET_COLOURS_UI[mkt]
@@ -876,9 +877,9 @@ def launch():
             tk.Label(row, text=lbl, bg=CLR_BG, fg=CLR_TEXT,
                      font=bold()).pack(side="left")
 
-        tk.Frame(launcher_panel, bg="#DDDDDD", height=1).pack(fill="x", padx=pad_x, pady=(max(4, fs // 3), 0))
+        tk.Frame(parent, bg="#DDDDDD", height=1).pack(fill="x", padx=pad_x, pady=(max(4, fs // 3), 0))
 
-        opt_frame = tk.Frame(launcher_panel, bg=CLR_BG, padx=pad_x, pady=pad_y)
+        opt_frame = tk.Frame(parent, bg=CLR_BG, padx=pad_x, pady=pad_y)
         opt_frame.pack(fill="x")
 
         # Top N
@@ -898,7 +899,7 @@ def launch():
         _make_toggle(opt_frame, "Refresh ticker lists (ignore weekly cache)", tickers_var)
         _make_toggle(opt_frame, "Export results to CSV after run",            export_var)
 
-        # Ranking mode — same tick style as market toggles, mutually exclusive
+        # Ranking mode
         rank_row = tk.Frame(opt_frame, bg=CLR_BG)
         rank_row.pack(fill="x", pady=max(1, fs // 6))
         tk.Label(rank_row, text="Rank by:", bg=CLR_BG,
@@ -932,7 +933,7 @@ def launch():
             _rank_btns[mode_val] = btn
 
         # Cache age info
-        age_frame = tk.Frame(launcher_panel, bg=CLR_BG, padx=pad_x)
+        age_frame = tk.Frame(parent, bg=CLR_BG, padx=pad_x)
         age_frame.pack(fill="x")
 
         price_age   = cache_data_age_days()
@@ -961,9 +962,9 @@ def launch():
         tk.Label(age_frame, text=p_txt, bg=CLR_BG, fg=p_clr, font=bold()).pack(anchor="w", pady=(0, max(1, fs // 6)))
         tk.Label(age_frame, text=s_txt, bg=CLR_BG, fg=s_clr, font=bold()).pack(anchor="w", pady=(0, max(2, fs // 4)))
 
-        tk.Frame(launcher_panel, bg="#DDDDDD", height=1).pack(fill="x", padx=pad_x, pady=(0, max(2, fs // 6)))
+        tk.Frame(parent, bg="#DDDDDD", height=1).pack(fill="x", padx=pad_x, pady=(0, max(2, fs // 6)))
 
-        btn_frame = tk.Frame(launcher_panel, bg=CLR_BG, padx=pad_x, pady=max(4, fs // 3))
+        btn_frame = tk.Frame(parent, bg=CLR_BG, padx=pad_x, pady=max(4, fs // 3))
         btn_frame.pack(fill="x")
         cfg = dict(font=bold(), relief="flat", bd=0, padx=max(8, fs), pady=max(4, fs // 2), cursor="hand2")
         run_btn = tk.Button(btn_frame, text="▶  Run Screener",
@@ -976,6 +977,99 @@ def launch():
                   activebackground="#AA2222",
                   command=root.destroy, **cfg).pack(side="right", padx=(0, 8))
         _update_run_btn()
+
+    def _build_watchlist_pane(parent):
+        # Delegate entirely to watchlist_picker — the panel builds itself
+        # inside *parent* and calls back here when the user hits Run.
+        def _on_run(tickers, do_download, do_export, rank_mode):
+            if not tickers:
+                return
+            # Persist for next launch
+            watchlist_tickers_var.set(", ".join(tickers))
+            config._set("watchlist_tickers",   ", ".join(tickers))
+            config._set("watchlist_rank_mode", rank_mode)
+            watchlist_rank_mode_var.set(rank_mode)
+            _switch_to_status()
+            threading.Thread(
+                target=_run_watchlist,
+                args=(tickers, do_download, do_export, rank_mode),
+                daemon=True,
+            ).start()
+
+        build_watchlist_panel(
+            parent       = parent,
+            root         = root,
+            fonts        = {
+                "mono":     mono(),
+                "bold":     bold(),
+                "tick":     tick_f(),
+                "hdr_bold": hdr_bold(),
+                "hdr_sub":  hdr_sub(),
+            },
+            colors       = {
+                "bg":      CLR_BG,
+                "accent":  CLR_ACCENT,
+                "text":    CLR_TEXT,
+                "subtext": CLR_SUBTEXT,
+                "btn_fg":  CLR_BTN_FG,
+                "row_a":   "#FFFFFF",
+                "row_b":   "#EFF4FA",
+                "warn":    CLR_WARN,
+            },
+            on_run_cb        = _on_run,
+            saved_tickers    = watchlist_tickers_var.get(),
+            saved_rank_mode  = watchlist_rank_mode_var.get(),
+        )
+
+    def _build_launcher():
+        for w in launcher_panel.winfo_children():
+            w.destroy()
+
+        _make_header(launcher_panel)
+
+        fs = config.font_size()
+
+        # ── Tab strip ─────────────────────────────────────────────────────
+        tab_strip = tk.Frame(launcher_panel, bg="#D8E4F0", bd=0)
+        tab_strip.pack(fill="x")
+
+        _tab_btns = {}
+        tab_content = tk.Frame(launcher_panel, bg=CLR_BG)
+        tab_content.pack(fill="both", expand=True)
+
+        screener_pane  = tk.Frame(tab_content, bg=CLR_BG)
+        watchlist_pane = tk.Frame(tab_content, bg=CLR_BG)
+
+        def _show_tab(name):
+            active_tab_var.set(name)
+            for n, btn in _tab_btns.items():
+                if n == name:
+                    btn.config(bg=CLR_BG, fg=CLR_ACCENT)
+                else:
+                    btn.config(bg="#D8E4F0", fg=CLR_SUBTEXT)
+            if name == "screener":
+                watchlist_pane.pack_forget()
+                screener_pane.pack(fill="both", expand=True)
+            else:
+                screener_pane.pack_forget()
+                watchlist_pane.pack(fill="both", expand=True)
+
+        for tab_id, tab_label in [("screener", "  Screener  "), ("watchlist", "  Watchlist  ")]:
+            btn = tk.Button(tab_strip, text=tab_label,
+                            font=bold(), relief="flat", bd=0,
+                            padx=6, pady=max(4, fs // 3),
+                            cursor="hand2",
+                            command=lambda n=tab_id: _show_tab(n))
+            btn.pack(side="left")
+            _tab_btns[tab_id] = btn
+
+        tk.Frame(tab_strip, bg="#D8E4F0").pack(side="left", fill="x", expand=True)
+
+        _build_screener_pane(screener_pane)
+        _build_watchlist_pane(watchlist_pane)
+        _show_tab(active_tab_var.get())
+
+
 
     # ── Status panel (built once) ─────────────────────────────────────────
     _make_header(status_panel)
@@ -1160,7 +1254,7 @@ def launch():
                 _log("STEP 2 — Loading cached signals")
                 _log("─" * 55)
                 _set_subtitle("Loading cached signals…")
-                results = load_signals(market_tickers, top_n=top_n, log=_log)
+                results = load_signals(market_tickers, top_n=top_n, rank_mode=rank_mode, log=_log)
 
                 if results:
                     _last_results["data"] = results
@@ -1202,7 +1296,8 @@ def launch():
             _log("STEP 3 — Momentum scoring")
             _log("─" * 55)
             results = run_screener(market_tickers, prices, top_n=top_n,
-                                   min_turnovers=config.get_all_min_turnovers(), log=_log)
+                                   min_turnovers=config.get_all_min_turnovers(),
+                                   rank_mode=rank_mode, log=_log)
 
             if not results:
                 _log("\n  ✗ No results — check price data above.")
@@ -1221,6 +1316,88 @@ def launch():
             _set_subtitle("Done — opening results…")
             _log("\n" + "─" * 55)
             _log(f"  ✓ Screener complete at {results['scored_at']}")
+            _log("  Opening results table…")
+            _log("─" * 55)
+
+            root.after(0, lambda: run_again_btn.pack(side="left"))
+            root.after(200, lambda: _show_results_inline(results, rank_mode))
+
+        except Exception as e:
+            import traceback
+            _log(f"\n  ✗ ERROR: {e}")
+            _log(traceback.format_exc())
+            _set_subtitle("Error — see log")
+            root.after(0, lambda: run_again_btn.pack(side="left"))
+
+    def _run_watchlist(tickers: list, do_download: bool, do_export: bool, rank_mode: str = "normal"):
+        try:
+            _log("─" * 55)
+            _log("WATCHLIST RUN")
+            _log("─" * 55)
+            _log(f"  Tickers ({len(tickers)}): {', '.join(tickers)}")
+
+            # Build a pseudo market_tickers dict — assign each ticker to its
+            # market based on suffix, defaulting to US for bare symbols.
+            market_tickers: dict[str, list[str]] = {}
+            for sym in tickers:
+                if sym.endswith(".AX"):
+                    mkt = "AU"
+                elif sym.endswith(".NZ"):
+                    mkt = "NZ"
+                elif sym.endswith(".SI"):
+                    mkt = "SG"
+                else:
+                    mkt = "US"
+                market_tickers.setdefault(mkt, []).append(sym)
+
+            _log(f"  Markets detected: { {m: len(t) for m, t in market_tickers.items()} }")
+
+            # ── Prices ────────────────────────────────────────────────────
+            _log("\n" + "─" * 55)
+            _log("STEP 1 — Prices")
+            _log("─" * 55)
+            _set_subtitle(f"{'Downloading' if do_download else 'Loading'} prices…")
+            prices = download_prices(market_tickers, force_refresh=do_download, log=_log)
+
+            if prices.empty:
+                _log("\n  ✗ No price data found. Tick 'Re-download prices' and try again.")
+                _set_subtitle("Failed — no price data")
+                root.after(0, lambda: run_again_btn.pack(side="left"))
+                return
+
+            _log(f"\n  Price matrix: {prices.shape[1]} tickers × {prices.shape[0]} trading days")
+
+            # ── Score ─────────────────────────────────────────────────────
+            _log("\n" + "─" * 55)
+            _log("STEP 2 — Momentum scoring")
+            _log("─" * 55)
+            _set_subtitle("Computing momentum scores…")
+
+            results = run_screener(
+                market_tickers, prices,
+                top_n=len(tickers),       # show all — no cutoff for watchlist
+                min_turnovers=None,       # no liquidity filter for hand-picked tickers
+                rank_mode=rank_mode,
+                log=_log,
+            )
+
+            if not results:
+                _log("\n  ✗ No results computed.")
+                _set_subtitle("Failed — no results")
+                root.after(0, lambda: run_again_btn.pack(side="left"))
+                return
+
+            _last_results["data"] = results
+
+            if do_export:
+                _log("\n" + "─" * 55)
+                _log("STEP 3 — Exporting CSV")
+                _log("─" * 55)
+                _do_export(results)
+
+            _set_subtitle("Done — opening results…")
+            _log("\n" + "─" * 55)
+            _log(f"  ✓ Watchlist complete at {results['scored_at']}")
             _log("  Opening results table…")
             _log("─" * 55)
 
