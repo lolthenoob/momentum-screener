@@ -166,13 +166,10 @@ def build_watchlist_panel(
             if tok and _SYM_RE.match(tok):
                 _initial_tickers.append(tok)
 
-    # ── Grid layout: rows 0-3 fixed height, row 4 (list) expands, row 5 footer ─
-    parent.columnconfigure(0, weight=1)
-    parent.rowconfigure(4, weight=1)   # list row expands
-
-    # ── Summary bar — row 0 ───────────────────────────────────────────────
+    # ── Layout: pure pack, top to bottom, no bottom-anchoring ────────────
+    # ── Summary bar ───────────────────────────────────────────────────────
     summary_frame = tk.Frame(parent, bg="#E8F4FD", pady=6, padx=14)
-    summary_frame.grid(row=0, column=0, sticky="ew")
+    summary_frame.pack(side="top", fill="x")
     tk.Label(summary_frame, text="Selected: ", bg="#E8F4FD",
              fg=CLR_SUBTEXT, font=bold).pack(side="left")
     summary_var = tk.StringVar(value="—")
@@ -180,9 +177,9 @@ def build_watchlist_panel(
              fg=CLR_ACCENT, font=bold, anchor="w",
              wraplength=600, justify="left").pack(side="left", fill="x", expand=True)
 
-    # Filter toggle
+    # ── Filter toggle ─────────────────────────────────────────────────────
     toggle_frame = tk.Frame(parent, bg=CLR_BG, pady=4, padx=14)
-    toggle_frame.grid(row=1, column=0, sticky="ew")
+    toggle_frame.pack(side="top", fill="x")
     filter_var = tk.StringVar(value="all")
     _filter_btns: dict[str, tuple] = {}
 
@@ -209,9 +206,9 @@ def build_watchlist_panel(
         fl.bind("<Button-1>", lambda e, v=f_val: _set_filter(v))
         _filter_btns[f_val] = (fb, fl)
 
-    # Search bar
+    # ── Search bar ────────────────────────────────────────────────────────
     search_frame = tk.Frame(parent, bg=CLR_BG, pady=6, padx=14)
-    search_frame.grid(row=2, column=0, sticky="ew")
+    search_frame.pack(side="top", fill="x")
     tk.Label(search_frame, text="🔍  Search / Add:", bg=CLR_BG,
              fg=CLR_TEXT, font=bold).pack(side="left")
     search_var = tk.StringVar()
@@ -239,14 +236,19 @@ def build_watchlist_panel(
         command=lambda: _select_visible(),
     )
 
-    # ── Scrollable list — row 4 (expands) ───────────────────────────────────
-    list_outer = tk.Frame(parent, bg=CLR_BG, padx=14)
-    list_outer.grid(row=4, column=0, sticky="nsew")
-
-    # ── Footer — row 5 (fixed) ────────────────────────────────────────────
-    tk.Frame(parent, bg="#DDDDDD", height=1).grid(row=5, column=0, sticky="ew")
+    # ── Control row 1: Select All | Clear All | count | Re-download | Export | Run ──
+    tk.Frame(parent, bg="#DDDDDD", height=1).pack(side="top", fill="x")
     ctrl = tk.Frame(parent, bg=CLR_BG, pady=6, padx=14)
-    ctrl.grid(row=6, column=0, sticky="ew")
+    ctrl.pack(side="top", fill="x")
+
+    # ── Control row 2: Rank ───────────────────────────────────────────────
+    tk.Frame(parent, bg="#DDDDDD", height=1).pack(side="top", fill="x")
+    rank_bar = tk.Frame(parent, bg=CLR_BG, pady=5, padx=14)
+    rank_bar.pack(side="top", fill="x")
+
+    # ── Scrollable list — fills all remaining space ───────────────────────
+    list_outer = tk.Frame(parent, bg=CLR_BG, padx=14)
+    list_outer.pack(side="top", fill="both", expand=True)
 
     canvas = tk.Canvas(list_outer, bg=CLR_BG, highlightthickness=0)
     scrollbar = ttk.Scrollbar(list_outer, orient="vertical", command=canvas.yview)
@@ -257,7 +259,10 @@ def build_watchlist_panel(
     inner = tk.Frame(canvas, bg=CLR_BG)
     canvas_win = canvas.create_window((0, 0), window=inner, anchor="nw")
 
-    canvas.bind("<Configure>", lambda e: canvas.itemconfig(canvas_win, width=e.width))
+    canvas.bind("<Configure>", lambda e: canvas.itemconfig(
+        canvas_win, width=e.width,
+        height=max(e.height, inner.winfo_reqheight()),
+    ))
     inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
 
     def _scroll(event):
@@ -696,8 +701,6 @@ def build_watchlist_panel(
         if sym and "," not in sym:
             _add_ticker_sym(sym)
 
-    add_new_btn.config(command=_add_new_from_btn)
-
     btn_cfg = dict(font=bold, relief="flat", bd=0, padx=12, pady=6, cursor="hand2")
 
     def _select_all():
@@ -750,37 +753,10 @@ def build_watchlist_panel(
 
         b.config(command=_toggle)
 
-    # Rank mode
+    # Run button and toggles in ctrl (row 1)
     rank_mode_var = tk.StringVar(value=saved_rank_mode)
     _rank_btns: dict = {}
 
-    rank_row = tk.Frame(ctrl, bg=CLR_BG)
-    rank_row.pack(side="left", padx=(12, 0))
-    tk.Label(rank_row, text="Rank:", bg=CLR_BG,
-             fg=CLR_SUBTEXT, font=bold).pack(side="left")
-
-    def _select_rank(chosen):
-        rank_mode_var.set(chosen)
-        for val, btn in _rank_btns.items():
-            btn.config(text="☑" if val == chosen else "☐",
-                       fg=CLR_ACCENT if val == chosen else "#AAAAAA")
-
-    for m_val, m_lbl in [("normal", "Normal"), ("weekly", "Weekly"), ("both", "Both")]:
-        cell = tk.Frame(rank_row, bg=CLR_BG)
-        cell.pack(side="left", padx=(8, 0))
-        is_on = saved_rank_mode == m_val
-        rb = tk.Button(cell, text="☑" if is_on else "☐",
-                       font=tick_font,
-                       fg=CLR_ACCENT if is_on else "#AAAAAA",
-                       bg=CLR_BG, activebackground=CLR_BG,
-                       relief="flat", bd=0, cursor="hand2",
-                       command=lambda v=m_val: _select_rank(v))
-        rb.pack(side="left")
-        tk.Label(cell, text=m_lbl, bg=CLR_BG, fg=CLR_TEXT,
-                 font=bold, cursor="hand2").pack(side="left")
-        _rank_btns[m_val] = rb
-
-    # Run button (rightmost)
     def _go():
         tickers = [s for s, v in check_vars.items() if v.get()]
         if not tickers:
@@ -799,6 +775,31 @@ def build_watchlist_panel(
 
     _make_option_toggle(ctrl, "Export CSV", export_var, side="right", padx=(0, 8))
     _make_option_toggle(ctrl, "Re-download", download_var, side="right", padx=(0, 8))
+
+    # Rank mode in rank_bar (row 2)
+    tk.Label(rank_bar, text="Rank:", bg=CLR_BG,
+             fg=CLR_SUBTEXT, font=bold).pack(side="left")
+
+    def _select_rank(chosen):
+        rank_mode_var.set(chosen)
+        for val, btn in _rank_btns.items():
+            btn.config(text="☑" if val == chosen else "☐",
+                       fg=CLR_ACCENT if val == chosen else "#AAAAAA")
+
+    for m_val, m_lbl in [("normal", "Normal"), ("weekly", "Weekly"), ("both", "Both")]:
+        cell = tk.Frame(rank_bar, bg=CLR_BG)
+        cell.pack(side="left", padx=(12, 0))
+        is_on = saved_rank_mode == m_val
+        rb = tk.Button(cell, text="☑" if is_on else "☐",
+                       font=tick_font,
+                       fg=CLR_ACCENT if is_on else "#AAAAAA",
+                       bg=CLR_BG, activebackground=CLR_BG,
+                       relief="flat", bd=0, cursor="hand2",
+                       command=lambda v=m_val: _select_rank(v))
+        rb.pack(side="left")
+        tk.Label(cell, text=m_lbl, bg=CLR_BG, fg=CLR_TEXT,
+                 font=bold, cursor="hand2").pack(side="left")
+        _rank_btns[m_val] = rb
 
     search_entry.focus_set()
 

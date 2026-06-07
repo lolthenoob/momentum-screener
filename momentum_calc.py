@@ -1101,6 +1101,7 @@ def run_screener(
     min_turnovers: dict[str, float] | None = None,
     rank_mode: str = "normal",
     log=None,
+    save_cache: bool = True,
 ) -> dict:
     _log(log, "\n  Computing momentum signals…")
 
@@ -1179,8 +1180,9 @@ def run_screener(
         "scored_at": datetime.now().isoformat(timespec="seconds"),
     }
 
-    # Always persist signals after computing
-    save_signals(results)
+    # Persist signals only for full screener runs, not watchlist runs
+    if save_cache:
+        save_signals(results)
 
     return results
 

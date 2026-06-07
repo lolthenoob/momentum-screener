@@ -1036,9 +1036,12 @@ def launch():
         _tab_btns = {}
         tab_content = tk.Frame(launcher_panel, bg=CLR_BG)
         tab_content.pack(fill="both", expand=True)
+        tab_content.pack_propagate(False)  # prevent children from shrinking the window
 
         screener_pane  = tk.Frame(tab_content, bg=CLR_BG)
         watchlist_pane = tk.Frame(tab_content, bg=CLR_BG)
+
+        _watchlist_built = [False]
 
         def _show_tab(name):
             active_tab_var.set(name)
@@ -1053,6 +1056,9 @@ def launch():
             else:
                 screener_pane.pack_forget()
                 watchlist_pane.pack(fill="both", expand=True)
+                if not _watchlist_built[0]:
+                    _watchlist_built[0] = True
+                    _build_watchlist_pane(watchlist_pane)
 
         for tab_id, tab_label in [("screener", "  Screener  "), ("watchlist", "  Watchlist  ")]:
             btn = tk.Button(tab_strip, text=tab_label,
@@ -1066,7 +1072,6 @@ def launch():
         tk.Frame(tab_strip, bg="#D8E4F0").pack(side="left", fill="x", expand=True)
 
         _build_screener_pane(screener_pane)
-        _build_watchlist_pane(watchlist_pane)
         _show_tab(active_tab_var.get())
 
 
@@ -1379,6 +1384,7 @@ def launch():
                 min_turnovers=None,       # no liquidity filter for hand-picked tickers
                 rank_mode=rank_mode,
                 log=_log,
+                save_cache=False,         # don't overwrite screener signal cache
             )
 
             if not results:

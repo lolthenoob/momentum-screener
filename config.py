@@ -25,6 +25,9 @@ DEFAULTS = {
     "rank_mode":                "normal",
     "hidden_cols":              "",   # comma-separated field names to hide
     "col_order":                "",   # comma-separated field names (scroll cols only)
+    # Watchlist mode
+    "watchlist_tickers":        "",   # last-used watchlist, comma-separated
+    "watchlist_rank_mode":      "normal",
     # Minimum average daily dollar turnover (price × volume) per market.
     # Tickers below this threshold are excluded before scoring.
     # Set to 0 to disable the filter for that market.
