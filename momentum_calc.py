@@ -354,7 +354,10 @@ def load_signals(market_tickers: dict, top_n: int = TOP_N, rank_mode: str = "nor
         sort_col = "weekly_score" if rank_mode == "weekly" else "momentum_score"
         ranked = df.sort_values(sort_col, ascending=False, na_position="last")
 
-        overall = ranked.dropna(subset=["momentum_score"]).head(top_n).copy()
+        selected_markets = set(market_tickers.keys())
+        ranked_filtered = ranked[ranked["market"].isin(selected_markets)]
+
+        overall = ranked_filtered.dropna(subset=["momentum_score"]).head(top_n).copy()
 
         by_market = {}
         for market in market_tickers:
@@ -641,7 +644,7 @@ def _weekly_exp_slope(s: pd.Series, length: int = 10) -> float | None:
         return None
     corr   = np.corrcoef(x, nl)[0, 1]
     slope  = corr * (y_std / x_std)
-    ann    = (np.exp(slope) ** 5 - 1) #annualise 1 week instead
+    ann    = (np.exp(slope) ** 5 - 1)
     r2     = np.corrcoef(np.arange(1, length + 1, dtype=float), nl)[0, 1] ** 2
     result = ann * r2
     return float(result) if np.isfinite(result) else None
@@ -770,7 +773,7 @@ def _load_names(conn: sqlite3.Connection, tickers: list[str]) -> dict[str, str]:
             ",".join("?" * len(tickers))
         ), tickers
     ).fetchall()
-    return {sym: name for sym, name in rows}
+    return {sym: name for sym, name in rows if name}
 
 
 def _store_names(conn: sqlite3.Connection, names: dict[str, str]):
@@ -807,14 +810,13 @@ def _fetch_names(tickers: list[str], log=None) -> dict[str, str]:
         total = len(missing)
         for i, sym in enumerate(missing):
             try:
-                info = yf.Ticker(sym).fast_info
-                name = getattr(info, "long_name", None)
-                if not name:
-                    full = yf.Ticker(sym).info
-                    name = full.get("longName") or full.get("shortName") or ""
-                fetched[sym] = name or ""
+                full = yf.Ticker(sym).info
+                name = (full.get("longName") or full.get("shortName") or "").strip()
+                if name:
+                    fetched[sym] = name
+                # If empty, don't cache — will retry next run
             except Exception:
-                fetched[sym] = ""
+                pass  # Don't cache failures — will retry next run
             if (i + 1) % 10 == 0 or (i + 1) == total:
                 _log(log, f"  Names: {i + 1}/{total}")
 
@@ -841,7 +843,7 @@ def _load_sectors(conn: sqlite3.Connection, tickers: list[str]) -> dict[str, str
             ",".join("?" * len(tickers))
         ), tickers
     ).fetchall()
-    return {sym: sector for sym, sector in rows}
+    return {sym: sector for sym, sector in rows if sector}
 
 
 def _store_sectors(conn: sqlite3.Connection, sectors: dict[str, str]):
@@ -875,10 +877,12 @@ def _fetch_sectors(tickers: list[str], log=None) -> dict[str, str]:
         for i, sym in enumerate(missing):
             try:
                 info   = yf.Ticker(sym).info
-                sector = info.get("sector") or info.get("industry") or ""
-                fetched[sym] = sector
+                sector = (info.get("sector") or info.get("industry") or "").strip()
+                if sector:
+                    fetched[sym] = sector
+                # If empty, don't cache — will retry next run
             except Exception:
-                fetched[sym] = ""
+                pass  # Don't cache failures — will retry next run
             if (i + 1) % 10 == 0 or (i + 1) == total:
                 _log(log, f"  Sectors: {i + 1}/{total}")
 
@@ -891,9 +895,13 @@ def _fetch_sectors(tickers: list[str], log=None) -> dict[str, str]:
     return {t: cached.get(t, "") for t in tickers}
 
 
-def _compute_signals(prices: pd.DataFrame, volumes: pd.DataFrame | None = None) -> pd.DataFrame:
+def _compute_signals(prices: pd.DataFrame, volumes: pd.DataFrame | None = None, log=None) -> pd.DataFrame:
     records = []
-    for sym in prices.columns:
+    total = len(prices.columns)
+    _log(log, f"  Computing signals for {total} tickers…")
+    checkpoints = {int(total * p / 10) for p in range(1, 11)}
+
+    for n, sym in enumerate(prices.columns, 1):
         col = prices[sym].dropna()
         if len(col) < 30:
             continue
@@ -967,6 +975,10 @@ def _compute_signals(prices: pd.DataFrame, volumes: pd.DataFrame | None = None) 
             "vol_surge":          vol_surge_val,
             "price_vs_ema20":     price_vs_ema20_val,
         })
+
+        if n in checkpoints:
+            pct = round(n / total * 100)
+            _log(log, f"  Signals: {n}/{total} ({pct}%)")
 
     df = pd.DataFrame(records).set_index("symbol")
 
@@ -1133,7 +1145,7 @@ def run_screener(
             _log(log, f"  Liquidity filter: {before} → {after} tickers "
                       f"({before - after} removed)")
 
-    signals = _compute_signals(prices, volumes if not volumes.empty else None)
+    signals = _compute_signals(prices, volumes if not volumes.empty else None, log=log)
     scored  = _score(signals)
 
     ticker_to_market = {
