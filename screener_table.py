@@ -157,6 +157,8 @@ COLUMNS = [
     ),  False),
     ("RAM Score",   "ram_score",      12,  lambda v, _: _fmt_num(v, 3),      _mk(_ram_clr),    False),
     ("Exp Slope",   "exp_slope",      12,  _fmt_slope,                        _mk(_slope_clr),  False),
+    ("Vol Ratio",   "vol_ratio",     10,  lambda v, _: _fmt_num(v, 2),      _mk(_vol_ratio_clr), False),
+    ("52w High%",   "high_52w_pct",  11,  _fmt_pct,                          _mk(_high_52w_clr),  False),
     ("12-1M Ret",   "ret_12_1",       12,  _fmt_pct,                          _mk(_ret_clr),    False),
     ("3M Ret",      "ret_3m",         12,  _fmt_pct,                          _mk(_ret_clr),    False),
     ("Stoch %K",    "stoch_k",        12,  lambda v, _: _fmt_num(v, 1),      lambda v, _: _osc_clr(v, 20, 80),   False),
@@ -169,8 +171,7 @@ COLUMNS = [
     ("MA50",        "above_ma50",     8,  _fmt_ma_flag,                      _mk(_ma_flag_clr),False),
     ("MA100",       "above_ma100",    8,  _fmt_ma_flag,                      _mk(_ma_flag_clr),False),
     ("MA200",       "above_ma200",    8,  _fmt_ma_flag,                      _mk(_ma_flag_clr),False),
-    ("Vol Ratio",   "vol_ratio",     10,  lambda v, _: _fmt_num(v, 2),      _mk(_vol_ratio_clr), False),
-    ("52w High%",   "high_52w_pct",  11,  _fmt_pct,                          _mk(_high_52w_clr),  False),
+
     # ── Weekly signals ────────────────────────────────────────────────────────
     ("Wk Score",    "weekly_score",   10, lambda v, _: _fmt_num(v, 1),      _mk(_score_clr),     False),
     ("1W Ret",      "ret_1w",         10, _fmt_pct,                          _mk(_ret_clr),       False),
@@ -186,7 +187,10 @@ _N_COLS     = len(COLUMNS)
 
 # ── Column width helpers ──────────────────────────────────────────────────────
 
-def _load_col_widths() -> list:
+def _load_col_widths(fs: int | None = None) -> list:
+    """Return pixel widths for all columns.
+    If a saved list exists and matches length, use it.
+    Otherwise derive from default char widths and current font size."""
     raw = config.get("col_widths").strip()
     if raw:
         try:
@@ -195,10 +199,11 @@ def _load_col_widths() -> list:
                 return w
         except ValueError:
             pass
-    return [c[2] for c in COLUMNS]
+    _fs = fs or config.font_size()
+    return [max(30, c[2] * (_fs - 2)) for c in COLUMNS]
 
 def _save_col_widths(widths: list):
-    config.set("col_widths", ",".join(str(w) for w in widths))
+    config.set("col_widths", ",".join(str(int(w)) for w in widths))
 
 def _col_px(char_w: int, fs: int) -> int:
     return max(30, char_w * (fs - 2))
@@ -275,6 +280,9 @@ def show_screener_table(
         bm = results.get("by_market", {})
         if market in bm and not bm[market].empty:
             tabs_data[market] = bm[market]
+    sector_df = _build_sector_df(results.get("overall", pd.DataFrame()), rank_mode)
+    if not sector_df.empty:
+        tabs_data["Sectors"] = sector_df
 
     tab_bar = tk.Frame(root, bg="#E8EDF4")
     tab_bar.pack(fill="x", padx=8, pady=(6, 0))
@@ -295,16 +303,28 @@ def show_screener_table(
         tab_frames[tab_name] = f
         tab_built[tab_name]  = False
 
+    _mw_unbind_callbacks = {}   # tab_name -> cleanup fn
+
     def _switch_tab(name):
         if _active_tab["name"] == name:
             return
+        # Clean up mousewheel binding from previous tab if needed
+        prev = _active_tab["name"]
+        if prev and prev in _mw_unbind_callbacks:
+            try:
+                _mw_unbind_callbacks[prev]()
+            except Exception:
+                pass
         if _active_tab["name"] and _active_tab["name"] in tab_frames:
             tab_frames[_active_tab["name"]].pack_forget()
 
         # Build the table the first time this tab is shown
         if not tab_built[name]:
+            unbind_ref = []
             _build_table(tab_frames[name], tabs_data[name], mono, bold, fs,
-                         rank_mode=rank_mode)
+                         rank_mode=rank_mode, _mw_unbind_ref=unbind_ref)
+            if unbind_ref:
+                _mw_unbind_callbacks[name] = unbind_ref[0]
             tab_built[name] = True
 
         tab_frames[name].pack(fill="both", expand=True)
@@ -362,13 +382,127 @@ def show_screener_table(
               command=_new_scan, **btn_cfg).pack(side="right", padx=(0, 6))
 
 
+# ── Sector helpers ────────────────────────────────────────────────────────────
+
+def _build_sector_df(overall: pd.DataFrame, rank_mode: str) -> pd.DataFrame:
+    """Aggregate overall results by sector for the Sectors tab."""
+    df = overall.copy()
+    if "sector" not in df.columns or df.empty:
+        return pd.DataFrame()
+    df = df[df["sector"].notna() & (df["sector"] != "")]
+    score_col = "weekly_score" if rank_mode == "weekly" else "momentum_score"
+    agg = df.groupby("sector").agg(
+        tickers   =("sector",    "count"),
+        avg_score =(score_col,   "mean"),
+        avg_1w    =("ret_1w",    "mean"),
+        avg_3m    =("ret_3m",    "mean"),
+        avg_vol   =("vol_surge", "mean"),
+        markets   =("market",    lambda x: "/".join(sorted(set(x)))),
+    ).reset_index()
+    agg = agg.sort_values("avg_score", ascending=False).reset_index(drop=True)
+    agg.insert(0, "rank", range(1, len(agg) + 1))
+    return agg
+
+
+def _build_sector_table(parent: tk.Frame, df: pd.DataFrame, mono, bold, fs: int,
+                        _mw_unbind_ref: list):
+    SCOLS = [
+        ("Rank",      "rank",      4,  lambda v, _: str(int(v)),          None),
+        ("Sector",    "sector",    24, lambda v, _: str(v),                None),
+        ("# Stocks",  "tickers",   8,  lambda v, _: str(int(v)),          None),
+        ("Avg Score", "avg_score", 15, lambda v, _: _fmt_num(v, 1),       _score_clr),
+        ("Avg 1W",    "avg_1w",    10, lambda v, _: _fmt_pct(v),          _ret_clr),
+        ("Avg 3M",    "avg_3m",    10, lambda v, _: _fmt_pct(v),          _ret_clr),
+        ("Vol Surge", "avg_vol",   10, lambda v, _: _fmt_num(v, 2),       None),
+        ("Markets",   "markets",   14, lambda v, _: str(v),               None),
+    ]
+
+    char_w = int(fs * 1.1)
+    row_h  = fs + max(6, fs // 2)
+    hdr_h  = fs + max(8, fs // 2) + max(4, fs // 3) * 2
+
+    outer = tk.Frame(parent, bg=CLR_BG)
+    outer.pack(fill="both", expand=True)
+
+    vsb    = ttk.Scrollbar(outer, orient="vertical")
+    vsb.pack(side="right", fill="y")
+
+    canvas = tk.Canvas(outer, bg=CLR_BG, highlightthickness=0,
+                       yscrollcommand=vsb.set)
+    canvas.pack(side="left", fill="both", expand=True)
+    vsb.config(command=canvas.yview)
+
+    inner = tk.Frame(canvas, bg=CLR_BG)
+    win   = canvas.create_window((0, 0), window=inner, anchor="nw")
+    inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+    canvas.bind("<Configure>", lambda e: canvas.itemconfig(win, width=e.width))
+
+    def _on_mw(e):
+        delta = -1 if e.num == 4 else (1 if e.num == 5 else int(-e.delta / 120))
+        canvas.yview_scroll(delta, "units")
+
+    def _bind_mw(w):
+        w.bind("<MouseWheel>", _on_mw)
+        w.bind("<Button-4>",   _on_mw)
+        w.bind("<Button-5>",   _on_mw)
+
+    _bind_mw(canvas)
+    _bind_mw(inner)
+
+    # Store unbind callback so _switch_tab can clean up when leaving this tab
+    def _unbind():
+        try:
+            canvas.unbind_all("<MouseWheel>")
+        except Exception:
+            pass
+    _mw_unbind_ref.append(_unbind)
+
+    # Header row
+    hdr_frame = tk.Frame(inner, bg=CLR_HDR_BG)
+    hdr_frame.grid(row=0, column=0, columnspan=len(SCOLS), sticky="ew")
+    for col_i, (label, field, chars, fmt, clr_fn) in enumerate(SCOLS):
+        w = chars * char_w
+        anchor = "w" if col_i <= 1 else "e"
+        tk.Label(hdr_frame, text=label + " ↓" if field == "avg_score" else label,
+                 font=bold, bg=CLR_HDR_BG, fg=CLR_HDR_FG,
+                 width=chars, anchor=anchor,
+                 relief="flat", pady=max(4, fs // 3), padx=4).pack(side="left")
+
+    # Data rows
+    for row_i, row in df.iterrows():
+        bg = CLR_ROW_A if row_i % 2 == 0 else CLR_ROW_B
+        row_frame = tk.Frame(inner, bg=bg)
+        row_frame.grid(row=row_i + 1, column=0, columnspan=len(SCOLS), sticky="ew")
+        _bind_mw(row_frame)
+        for col_i, (label, field, chars, fmt, clr_fn) in enumerate(SCOLS):
+            val     = row.get(field)
+            if isinstance(val, float) and np.isnan(val):
+                val = None
+            text    = fmt(val, None) if val is not None else "—"
+            cell_bg = clr_fn(val) if (clr_fn and val is not None) else bg
+            anchor  = "w" if col_i <= 1 else "e"
+            lbl = tk.Label(row_frame, text=text, font=mono,
+                           bg=cell_bg, fg=CLR_TEXT,
+                           width=chars, anchor=anchor,
+                           relief="flat", pady=max(2, fs // 6), padx=4)
+            lbl.pack(side="left")
+            _bind_mw(lbl)
+
+
 # ── Table builder ─────────────────────────────────────────────────────────────
 
 def _build_table(parent: tk.Frame, df: pd.DataFrame, mono, bold, fs: int,
-                 rank_mode: str = "normal"):
+                 rank_mode: str = "normal", _mw_unbind_ref: list = None):
+    if _mw_unbind_ref is None:
+        _mw_unbind_ref = []
     if df.empty:
         tk.Label(parent, text="No data for this market.",
                  bg=CLR_BG, fg=CLR_SUBTEXT, font=mono).pack(pady=40)
+        return
+
+    # Sector summary tab has its own column layout — render separately
+    if "avg_score" in df.columns:
+        _build_sector_table(parent, df, mono, bold, fs, _mw_unbind_ref=_mw_unbind_ref)
         return
 
     # ── Column set for this rank mode ─────────────────────────────────────
@@ -393,7 +527,23 @@ def _build_table(parent: tk.Frame, df: pd.DataFrame, mono, bold, fs: int,
 
     # Always keep frozen cols; filter scroll cols by mode
     _active_frozen = [c for c in FROZEN_COLS if _keep(c)]
-    _active_scroll = [c for c in SCROLL_COLS if _keep(c)]
+
+    # Apply user visibility + ordering prefs to scroll cols
+    _hidden  = config.get_hidden_cols()
+    _order   = config.get_col_order()
+
+    # Filter by mode and visibility
+    _mode_scroll = [c for c in SCROLL_COLS if _keep(c) and c[1] not in _hidden]
+
+    # Apply saved order (only for cols present in this mode)
+    if _order:
+        _field_map   = {c[1]: c for c in _mode_scroll}
+        _ordered     = [_field_map[f] for f in _order if f in _field_map]
+        _remaining   = [c for c in _mode_scroll if c[1] not in set(_order)]
+        _active_scroll = _ordered + _remaining
+    else:
+        _active_scroll = _mode_scroll
+
     # Build a local ordered column list (frozen first) for index lookups
     _active_cols   = _active_frozen + _active_scroll
 
@@ -409,10 +559,10 @@ def _build_table(parent: tk.Frame, df: pd.DataFrame, mono, bold, fs: int,
     if "name" not in df.columns:
         df["name"] = ""
 
-    col_widths = _load_col_widths()
+    col_widths = _load_col_widths(fs)
 
     def px(col_idx):
-        return _col_px(col_widths[col_idx], fs)
+        return max(30, int(col_widths[col_idx]))
 
     row_h = fs + max(6, fs // 2)
     hdr_h = fs + max(8, fs // 2) + max(4, fs // 3) * 2
@@ -572,11 +722,17 @@ def _build_table(parent: tk.Frame, df: pd.DataFrame, mono, bold, fs: int,
         def _drag(e, idx=col_idx, f=cf):
             new_w = max(30, f._dw + (e.x_root - f._dx))
             f.config(width=new_w)
-            col_widths[idx] = max(1, new_w // (fs - 2))
-            _save_col_widths(col_widths)
+            col_widths[idx] = new_w
 
-        handle.bind("<ButtonPress-1>", _start)
-        handle.bind("<B1-Motion>",     _drag)
+        def _release(e, idx=col_idx, f=cf):
+            new_w = max(30, f.winfo_width())
+            col_widths[idx] = new_w
+            _save_col_widths(col_widths)
+            _render(_current_df[0])
+
+        handle.bind("<ButtonPress-1>",  _start)
+        handle.bind("<B1-Motion>",      _drag)
+        handle.bind("<ButtonRelease-1>", _release)
 
     for col in _active_frozen:
         _make_hdr_cell(frozen_hdr, col, COLUMNS.index(col))
@@ -634,8 +790,10 @@ def _build_table(parent: tk.Frame, df: pd.DataFrame, mono, bold, fs: int,
     # ── Data render ───────────────────────────────────────────────────────
     frozen_rows = []
     scroll_rows = []
+    _current_df = [None]   # mutable holder so drag-release can re-render
 
     def _render(data: pd.DataFrame):
+        _current_df[0] = data
         for rf in frozen_rows:
             rf.destroy()
         for rf in scroll_rows:
@@ -667,6 +825,10 @@ def _build_table(parent: tk.Frame, df: pd.DataFrame, mono, bold, fs: int,
         # Defer geometry updates so the window event loop stays responsive.
         # Calling update_idletasks() inline blocks the main thread while
         # Win32 processes thousands of pending widget messages → freeze/crash.
+        # Update frozen pane width in case a frozen col was resized
+        new_frozen_w = sum(px(COLUMNS.index(c)) for c in _active_frozen)
+        frozen_pane.config(width=new_frozen_w)
+
         frozen_canvas.after_idle(
             lambda: frozen_canvas.configure(scrollregion=frozen_canvas.bbox("all"))
         )

@@ -38,27 +38,50 @@ def _show_prefs(root, on_save=None):
     """
     Renders a modal-like preferences panel as a Frame placed over the root
     window. No Toplevel created, so no Win32 system-menu crash.
+    Full-size (like About), split into left (settings) and right (columns) panes.
     """
-    fs = config.font_size()
-    f  = tkfont.Font(family="Consolas", size=fs)
-    fb = tkfont.Font(family="Consolas", size=fs, weight="bold")
+    from screener_table import COLUMNS, FROZEN_COLS, SCROLL_COLS
+
+    fs      = config.font_size()
+    f       = tkfont.Font(family="Consolas", size=fs)
+    fb      = tkfont.Font(family="Consolas", size=fs, weight="bold")
+    small_f = tkfont.Font(family="Consolas", size=max(8, fs - 1))
     title_f = tkfont.Font(family="Consolas", size=fs + 2, weight="bold")
 
-    # Semi-transparent dark backdrop
     backdrop = tk.Frame(root, bg="#000000")
     backdrop.place(relx=0, rely=0, relwidth=1, relheight=1)
 
-    # Centre card
+    MARGIN = 24
     card = tk.Frame(backdrop, bg=CLR_BG,
                     highlightthickness=1, highlightbackground="#AAAACC")
-    card.place(relx=0.5, rely=0.5, anchor="center")
+    card.place(x=MARGIN, y=MARGIN, relwidth=1.0, relheight=1.0,
+               width=-MARGIN * 2, height=-MARGIN * 2)
 
+    # ── Title ─────────────────────────────────────────────────────────────
     tk.Label(card, text="Preferences", bg=CLR_BG, fg=CLR_TEXT,
-             font=title_f).grid(row=0, column=0, columnspan=2,
+             font=title_f).grid(row=0, column=0, columnspan=3,
                                 padx=20, pady=(16, 8), sticky="w")
     tk.Frame(card, bg="#DDDDDD", height=1).grid(
-        row=1, column=0, columnspan=2, sticky="ew", padx=16, pady=(0, 8))
+        row=1, column=0, columnspan=3, sticky="ew", padx=16, pady=(0, 8))
 
+    # ── Two-column layout: left = settings, divider, right = columns ──────
+    card.rowconfigure(2, weight=1)
+    card.columnconfigure(0, weight=0)   # left settings pane — fixed
+    card.columnconfigure(1, weight=0)   # divider
+    card.columnconfigure(2, weight=1)   # right columns pane — expands
+
+    left_pane = tk.Frame(card, bg=CLR_BG)
+    left_pane.grid(row=2, column=0, sticky="nsew", padx=(16, 0), pady=(0, 0))
+
+    tk.Frame(card, bg="#DDDDDD", width=1).grid(
+        row=2, column=1, sticky="ns", padx=12, pady=4)
+
+    right_pane = tk.Frame(card, bg=CLR_BG)
+    right_pane.grid(row=2, column=2, sticky="nsew", padx=(0, 16), pady=(0, 0))
+    right_pane.rowconfigure(1, weight=1)
+    right_pane.columnconfigure(0, weight=1)
+
+    # ── LEFT: General settings ────────────────────────────────────────────
     simple_fields = [
         ("Font size (8–24):",  "font_size"),
         ("Top N per market:",  "top_n"),
@@ -72,46 +95,49 @@ def _show_prefs(root, on_save=None):
 
     vars_   = {}
     entries = {}
-    row_idx = 2
+    lrow    = 0
+
+    tk.Label(left_pane, text="General", bg=CLR_BG, fg=CLR_SUBTEXT,
+             font=small_f).grid(row=lrow, column=0, columnspan=2,
+                                sticky="w", pady=(0, 4))
+    lrow += 1
 
     for label, key in simple_fields:
-        tk.Label(card, text=label, bg=CLR_BG, fg=CLR_TEXT,
-                 font=fb, anchor="w", width=28).grid(
-            row=row_idx, column=0, padx=16, pady=5, sticky="w")
+        tk.Label(left_pane, text=label, bg=CLR_BG, fg=CLR_TEXT,
+                 font=fb, anchor="w", width=26).grid(
+            row=lrow, column=0, pady=5, sticky="w")
         v = tk.StringVar(value=config.get(key))
-        tk.Entry(card, textvariable=v, font=f, width=8,
+        tk.Entry(left_pane, textvariable=v, font=f, width=8,
                  relief="flat", highlightthickness=1,
-                 highlightbackground="#CCCCCC").grid(row=row_idx, column=1, padx=8)
+                 highlightbackground="#CCCCCC").grid(row=lrow, column=1, padx=(8, 0))
         vars_[key] = v
-        row_idx += 1
+        lrow += 1
 
-    tk.Frame(card, bg="#DDDDDD", height=1).grid(
-        row=row_idx, column=0, columnspan=2, sticky="ew", padx=16, pady=(8, 4))
-    row_idx += 1
+    tk.Frame(left_pane, bg="#DDDDDD", height=1).grid(
+        row=lrow, column=0, columnspan=2, sticky="ew", pady=(8, 4))
+    lrow += 1
 
     auto_resize_var = tk.BooleanVar(value=config.get_bool("auto_resize"))
-    auto_frame = tk.Frame(card, bg=CLR_BG)
-    auto_frame.grid(row=row_idx, column=0, columnspan=2, sticky="w", padx=16, pady=(0, 4))
-    row_idx += 1
     tk.Checkbutton(
-        auto_frame, text="Auto-resize windows to font size",
+        left_pane, text="Auto-resize windows to font size",
         variable=auto_resize_var, bg=CLR_BG, fg=CLR_TEXT, font=fb,
         activebackground=CLR_BG, selectcolor=CLR_BG,
         relief="flat", bd=0, cursor="hand2",
-    ).pack(side="left")
+    ).grid(row=lrow, column=0, columnspan=2, sticky="w", pady=(0, 4))
+    lrow += 1
 
     for label, key in size_fields:
-        tk.Label(card, text=label, bg=CLR_BG, fg=CLR_TEXT,
-                 font=fb, anchor="w", width=28).grid(
-            row=row_idx, column=0, padx=16, pady=4, sticky="w")
+        tk.Label(left_pane, text=label, bg=CLR_BG, fg=CLR_TEXT,
+                 font=fb, anchor="w", width=26).grid(
+            row=lrow, column=0, pady=4, sticky="w")
         v = tk.StringVar(value=config.get(key))
-        e = tk.Entry(card, textvariable=v, font=f, width=8,
+        e = tk.Entry(left_pane, textvariable=v, font=f, width=8,
                      relief="flat", highlightthickness=1,
                      highlightbackground="#CCCCCC")
-        e.grid(row=row_idx, column=1, padx=8)
+        e.grid(row=lrow, column=1, padx=(8, 0))
         vars_[key]   = v
         entries[key] = e
-        row_idx += 1
+        lrow += 1
 
     def _update_size_fields(*_):
         state = "disabled" if auto_resize_var.get() else "normal"
@@ -122,34 +148,149 @@ def _show_prefs(root, on_save=None):
     auto_resize_var.trace_add("write", _update_size_fields)
     _update_size_fields()
 
-    tk.Label(card, text="Column widths auto-reset when font size changes.",
-             bg=CLR_BG, fg=CLR_SUBTEXT, font=f).grid(
-        row=row_idx, column=0, columnspan=2, pady=(6, 0), padx=16, sticky="w")
-    row_idx += 1
+    tk.Label(left_pane, text="Column widths reset when font size changes.",
+             bg=CLR_BG, fg=CLR_SUBTEXT, font=small_f).grid(
+        row=lrow, column=0, columnspan=2, pady=(6, 0), sticky="w")
+
+    # ── RIGHT: Column visibility + ordering ───────────────────────────────
+    tk.Label(right_pane, text="Result table columns  (scroll columns only — Rank and Ticker always shown)",
+             bg=CLR_BG, fg=CLR_SUBTEXT, font=small_f).grid(
+        row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
+
+    # list_frame holds the scrollable column list
+    list_frame = tk.Frame(right_pane, bg=CLR_BG,
+                          highlightthickness=1, highlightbackground="#CCCCCC")
+    list_frame.grid(row=1, column=0, sticky="nsew", pady=(0, 4))
+    list_frame.rowconfigure(0, weight=1)
+    list_frame.columnconfigure(0, weight=1)
+
+    list_canvas = tk.Canvas(list_frame, bg=CLR_BG, highlightthickness=0)
+    list_sb     = tk.Scrollbar(list_frame, orient="vertical",
+                               command=list_canvas.yview)
+    list_canvas.configure(yscrollcommand=list_sb.set)
+    list_canvas.grid(row=0, column=0, sticky="nsew")
+    list_sb.grid(row=0, column=1, sticky="ns")
+
+    inner = tk.Frame(list_canvas, bg=CLR_BG)
+    list_canvas.create_window((0, 0), window=inner, anchor="nw")
+    inner.bind("<Configure>",
+               lambda e: list_canvas.configure(scrollregion=list_canvas.bbox("all")))
+
+    # Build working list: order from config, hidden from config
+    _hidden  = config.get_hidden_cols()
+    _order   = config.get_col_order()
+    # All scroll column tuples
+    _all_scroll = list(SCROLL_COLS)
+    # Apply saved order
+    if _order:
+        _field_map  = {c[1]: c for c in _all_scroll}
+        _ordered    = [_field_map[f] for f in _order if f in _field_map]
+        _remaining  = [c for c in _all_scroll if c[1] not in set(_order)]
+        _working    = _ordered + _remaining
+    else:
+        _working = list(_all_scroll)
+
+    # State: list of [col_tuple, visible_BooleanVar] in current order
+    col_states = [[c, tk.BooleanVar(value=c[1] not in _hidden)] for c in _working]
+
+    row_frames = []
+
+    def _rebuild_list():
+        for rf in row_frames:
+            rf.destroy()
+        row_frames.clear()
+
+        for i, (col, vis_var) in enumerate(col_states):
+            rf = tk.Frame(inner, bg=CLR_BG)
+            rf.pack(fill="x", pady=1)
+            row_frames.append(rf)
+
+            # Up/down buttons
+            btn_up = tk.Button(rf, text="▲", font=small_f,
+                               bg=CLR_BG, fg=CLR_TEXT, relief="flat",
+                               cursor="hand2", padx=2, pady=0,
+                               command=lambda idx=i: _move(idx, -1))
+            btn_up.pack(side="left")
+            btn_dn = tk.Button(rf, text="▼", font=small_f,
+                               bg=CLR_BG, fg=CLR_TEXT, relief="flat",
+                               cursor="hand2", padx=2, pady=0,
+                               command=lambda idx=i: _move(idx, +1))
+            btn_dn.pack(side="left")
+
+            # Visibility checkbox
+            cb = tk.Checkbutton(rf, variable=vis_var,
+                                bg=CLR_BG, activebackground=CLR_BG,
+                                selectcolor=CLR_BG, relief="flat", bd=0,
+                                cursor="hand2")
+            cb.pack(side="left", padx=(4, 0))
+
+            # Column name label
+            tk.Label(rf, text=col[0], font=small_f if vis_var.get() else f,
+                     bg=CLR_BG,
+                     fg=CLR_TEXT if vis_var.get() else CLR_SUBTEXT,
+                     anchor="w").pack(side="left", padx=4)
+
+            # Field name in grey
+            tk.Label(rf, text=f"({col[1]})", font=small_f,
+                     bg=CLR_BG, fg="#AAAAAA", anchor="w").pack(side="left")
+
+    def _move(idx: int, direction: int):
+        new_idx = idx + direction
+        if 0 <= new_idx < len(col_states):
+            col_states[idx], col_states[new_idx] = col_states[new_idx], col_states[idx]
+            _rebuild_list()
+
+    _rebuild_list()
+
+    # Mousewheel on the inner canvas
+    def _mw(e):
+        delta = -1 if e.num == 4 else (1 if e.num == 5 else int(-e.delta / 120))
+        list_canvas.yview_scroll(delta, "units")
+    list_canvas.bind("<MouseWheel>", _mw)
+    list_canvas.bind("<Button-4>",   _mw)
+    list_canvas.bind("<Button-5>",   _mw)
+    inner.bind("<MouseWheel>", _mw)
+    inner.bind("<Button-4>",   _mw)
+    inner.bind("<Button-5>",   _mw)
+
+    # Up/down buttons column on the right
+    btn_col = tk.Frame(right_pane, bg=CLR_BG)
+    btn_col.grid(row=1, column=1, sticky="n", padx=(6, 0))
+
+    # ── Dismiss / Save ────────────────────────────────────────────────────
+    tk.Frame(card, bg="#DDDDDD", height=1).grid(
+        row=3, column=0, columnspan=3, sticky="ew", padx=16, pady=(4, 0))
 
     def _dismiss():
         backdrop.destroy()
 
     def _save():
         old_fs = config.font_size()
-        config.set("auto_resize", auto_resize_var.get())
+        config._set("auto_resize", auto_resize_var.get())
         for key, v in vars_.items():
             if key in [k for _, k in size_fields] and auto_resize_var.get():
                 continue
             raw = v.get().strip()
             if raw:
                 try:
-                    config.set(key, int(raw))
+                    config._set(key, int(raw))
                 except ValueError:
                     pass
         if config.font_size() != old_fs:
             config.clear_col_widths()
+
+        # Save column visibility and order
+        new_hidden = {c[1] for c, vis in col_states if not vis.get()}
+        new_order  = [c[1] for c, _ in col_states]
+        config.set_hidden_cols(new_hidden)
+        config.set_col_order(new_order)
+
         _dismiss()
         if on_save:
             on_save()
 
     bf = tk.Frame(card, bg=CLR_BG)
-    bf.grid(row=row_idx, column=0, columnspan=2, pady=12)
+    bf.grid(row=4, column=0, columnspan=3, pady=12)
     tk.Button(bf, text="Save", bg=CLR_ACCENT, fg="white",
               font=fb, relief="flat", padx=14, pady=6,
               cursor="hand2", command=_save).pack(side="left", padx=6)
@@ -396,7 +537,9 @@ def launch():
         else:
             w = min(config.get_int("launcher_w") or base_w, sw - 40)
             h = min(config.get_int("launcher_h") or base_h, sh - 40)
-        root.geometry(f"{w}x{h}+{(sw - w) // 2}+{(sh - h) // 2}")
+        sh_usable = sh - 48  # 48px = standard Windows taskbar height
+        h = min(h, sh_usable)
+        root.geometry(f"{w}x{h}+{(sw - w) // 2}+{(sh_usable - h) // 2}")
         fs_now = config.font_size()
         root.minsize(max(600, int(base_w * fs_now / 12)),
                      max(400, int(base_h * fs_now / 12)))
@@ -985,9 +1128,9 @@ def launch():
             top_n = max(1, int(top_n_var.get()))
         except ValueError:
             top_n = config.get_int("top_n") or 50
-        config.set("top_n", top_n)
-        config.set("export_csv", export_var.get())
-        config.set("rank_mode", rank_mode_var.get())
+        config._set("top_n", top_n)
+        config._set("export_csv", export_var.get())
+        config._set("rank_mode", rank_mode_var.get())
         selected_markets = [m for m, v in market_vars.items() if v.get()]
         config.set_active_markets(selected_markets)
         _switch_to_status()

@@ -55,6 +55,9 @@ _SIGNAL_COLS = [
     "above_ma25", "above_ma50", "above_ma100", "above_ma200",
     "vol_ratio", "high_52w_pct", "rank_change",
     "market", "momentum_score", "name", "sector",
+    # Weekly signals
+    "ret_1w", "weekly_exp_slope", "weekly_rsi", "vol_surge",
+    "price_vs_ema20", "weekly_score", "weekly_rank_change"
 ]
 
 
@@ -344,7 +347,8 @@ def load_signals(market_tickers: dict, top_n: int = TOP_N, log=None) -> dict | N
             df["market"] = df.index.map(lambda s: ticker_to_market.get(s, "?"))
 
         df = df.sort_values("momentum_score", ascending=False, na_position="last")
-        df = _attach_rank_change(df, conn)
+        df = _attach_rank_change(df, conn, "momentum_score", "rank_change")
+        df = _attach_rank_change(df, conn, "weekly_score", "weekly_rank_change")
         conn.close()
 
         overall = df.dropna(subset=["momentum_score"]).head(top_n).copy()
@@ -369,55 +373,53 @@ def load_signals(market_tickers: dict, top_n: int = TOP_N, log=None) -> dict | N
 
 
 
-def _attach_rank_change(df, conn):
+def _attach_rank_change(df, conn, score_col="momentum_score", out_col="rank_change"):
     """
-    Attach a rank_change column to df.
-    Positive = moved up (e.g. +3 means ranked 3 places higher than last run).
-    Negative = moved down. NaN = new entry (not in previous signals).
-    Rank is determined by momentum_score position within the full signal_prev universe.
+    Attach a rank_change column to df based on score_col.
+    Positive = moved up. Negative = moved down. NaN = new entry.
     """
     try:
         prev_rows = conn.execute(
             "SELECT symbol, data_json FROM signal_prev"
         ).fetchall()
         if not prev_rows:
-            df["rank_change"] = np.nan
+            df[out_col] = np.nan
             return df
 
         prev_scores = {}
         for sym, data_json in prev_rows:
             try:
                 d = json.loads(data_json)
-                score = d.get("momentum_score")
+                score = d.get(score_col)
                 if score is not None:
                     prev_scores[sym] = float(score)
             except Exception:
                 pass
 
         if not prev_scores:
-            df["rank_change"] = np.nan
+            df[out_col] = np.nan
             return df
 
-        # Higher score = rank 1 = best
         prev_series = pd.Series(prev_scores).sort_values(ascending=False)
         prev_rank   = {sym: i + 1 for i, sym in enumerate(prev_series.index)}
 
-        # Current rank from df (already sorted by momentum_score descending)
-        curr_rank = {sym: i + 1 for i, sym in enumerate(df.index)}
+        curr_rank = {sym: i + 1 for i, sym in enumerate(
+            df.sort_values(score_col, ascending=False, na_position="last").index
+        )}
 
         changes = {}
         for sym in df.index:
             curr = curr_rank.get(sym)
             prev = prev_rank.get(sym)
             if curr is not None and prev is not None:
-                changes[sym] = prev - curr   # positive = moved up
+                changes[sym] = prev - curr
             else:
                 changes[sym] = np.nan
 
-        df["rank_change"] = pd.Series(changes)
+        df[out_col] = pd.Series(changes)
     except Exception as e:
-        print(f"  \u26a0  rank_change attach failed: {e}")
-        df["rank_change"] = np.nan
+        print(f"  ⚠  {out_col} attach failed: {e}")
+        df[out_col] = np.nan
 
     return df
 
@@ -607,6 +609,105 @@ def _high_52w_pct(price_series: pd.Series) -> float | None:
     if high == 0:
         return None
     return float((price / high) - 1)
+
+
+# ── Weekly signal helpers ─────────────────────────────────────────────────────
+
+def _ret_1w(s: pd.Series) -> float | None:
+    """Simple 5-day price return."""
+    s = s.dropna()
+    if len(s) < 6:
+        return None
+    val = float(s.iloc[-1] / s.iloc[-6] - 1)
+    return val if np.isfinite(val) else None
+
+
+def _weekly_exp_slope(s: pd.Series, length: int = 10) -> float | None:
+    """
+    Exponential regression slope over the last `length` days (default 10 = 2 weeks),
+    annualised and weighted by R² — same method as exp_slope but short-window.
+    """
+    s = s.dropna()
+    if len(s) < length:
+        return None
+    window = s.iloc[-length:].values
+    nl     = np.log(window)
+    x      = np.arange(length, dtype=float)
+    x_std  = x.std();  y_std = nl.std()
+    if x_std == 0 or y_std == 0:
+        return None
+    corr   = np.corrcoef(x, nl)[0, 1]
+    slope  = corr * (y_std / x_std)
+    ann    = (np.exp(slope) ** DAYS_IN_YR - 1)
+    r2     = np.corrcoef(np.arange(1, length + 1, dtype=float), nl)[0, 1] ** 2
+    result = ann * r2
+    return float(result) if np.isfinite(result) else None
+
+
+def _weekly_rsi(s: pd.Series, period: int = 5) -> float | None:
+    """RSI with a short 5-period window — weekly-sensitive momentum oscillator."""
+    s = s.dropna()
+    if len(s) < period + 1:
+        return None
+    delta = s.diff().dropna()
+    gain  = delta.clip(lower=0).rolling(period).mean()
+    loss  = (-delta.clip(upper=0)).rolling(period).mean()
+    rs    = gain / loss.replace(0, np.nan)
+    rsi   = 100 - (100 / (1 + rs))
+    val   = rsi.iloc[-1]
+    return float(val) if not np.isnan(val) else None
+
+
+def _vol_surge(price_vol: pd.Series, short: int = 5, long: int = 20) -> float | None:
+    """
+    This week's average volume vs the prior 4-week average.
+    > 1.0 means volume is elevated — conviction behind the move.
+    """
+    v = price_vol.dropna()
+    if len(v) < long + short:
+        return None
+    avg_short = float(v.iloc[-short:].mean())
+    avg_long  = float(v.iloc[-(long + short):-short].mean())
+    if avg_long == 0:
+        return None
+    ratio = avg_short / avg_long
+    return float(ratio) if np.isfinite(ratio) else None
+
+
+def _price_vs_ema20(s: pd.Series) -> float | None:
+    """
+    How far current price is above/below its 20-day EMA, as a fraction.
+    Positive = above EMA (bullish), negative = below (bearish).
+    """
+    s = s.dropna()
+    if len(s) < 20:
+        return None
+    ema = s.ewm(span=20, adjust=False).mean()
+    val = float((s.iloc[-1] / ema.iloc[-1]) - 1)
+    return val if np.isfinite(val) else None
+
+
+def _weekly_score_composite(df: pd.DataFrame) -> pd.Series:
+    """
+    Rank-normalise the four weekly signals and average them into a
+    weekly_score (0–100). Signals with too few valid values are skipped.
+    """
+    weekly_cols = {
+        "ret_1w":          _rank_norm,
+        "weekly_exp_slope": _rank_norm,
+        "weekly_rsi":      _rank_norm,
+        "vol_surge":       _rank_norm,
+        "price_vs_ema20":  _rank_norm,
+    }
+    rank_cols = []
+    for col, fn in weekly_cols.items():
+        if col in df.columns and df[col].notna().sum() >= 3:
+            rk = f"weekly_rank_{col}"
+            df[rk] = fn(df[col])
+            rank_cols.append(rk)
+    if not rank_cols:
+        return pd.Series(np.nan, index=df.index)
+    return df[rank_cols].mean(axis=1)
 
 
 def _exp_reg_slope(s: pd.Series, length: int = EXP_REG_LEN) -> float | None:
@@ -814,6 +915,15 @@ def _compute_signals(prices: pd.DataFrame, volumes: pd.DataFrame | None = None) 
         if volumes is not None and sym in volumes.columns:
             vol_ratio_val = _vol_ratio(volumes[sym])
 
+        # ── Weekly signals ────────────────────────────────────────────────────
+        ret_1w_val          = _ret_1w(col)
+        weekly_exp_slope_val = _weekly_exp_slope(col)
+        weekly_rsi_val      = _weekly_rsi(col)
+        price_vs_ema20_val  = _price_vs_ema20(col)
+        vol_surge_val       = None
+        if volumes is not None and sym in volumes.columns:
+            vol_surge_val = _vol_surge(volumes[sym])
+
         ma25  = _ma_val(col, 25)
         ma50  = _ma_val(col, 50)
         ma100 = _ma_val(col, 100)
@@ -845,8 +955,14 @@ def _compute_signals(prices: pd.DataFrame, volumes: pd.DataFrame | None = None) 
             "above_ma50":   above_ma50,
             "above_ma100":  above_ma100,
             "above_ma200":  above_ma200,
-            "vol_ratio":    vol_ratio_val,
-            "high_52w_pct": high_52w,
+            "vol_ratio":          vol_ratio_val,
+            "high_52w_pct":       high_52w,
+            # Weekly
+            "ret_1w":             ret_1w_val,
+            "weekly_exp_slope":   weekly_exp_slope_val,
+            "weekly_rsi":         weekly_rsi_val,
+            "vol_surge":          vol_surge_val,
+            "price_vs_ema20":     price_vs_ema20_val,
         })
 
     df = pd.DataFrame(records).set_index("symbol")
@@ -896,6 +1012,7 @@ def _score(df: pd.DataFrame) -> pd.DataFrame:
             df[rk_col] = fn(df[col])
             rank_cols.append(rk_col)
     df["momentum_score"] = df[rank_cols].mean(axis=1)
+    df["weekly_score"]   = _weekly_score_composite(df)
     return df.sort_values("momentum_score", ascending=False)
 
 
@@ -928,11 +1045,57 @@ def cache_signals_age_days() -> int | None:
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
+def _apply_turnover_filter(
+    prices: pd.DataFrame,
+    volumes: pd.DataFrame,
+    ticker_to_market: dict[str, str],
+    min_turnovers: dict[str, float],
+    log=None,
+) -> pd.DataFrame:
+    if not min_turnovers or volumes is None or volumes.empty:
+        return prices
+
+    keep = []
+    dropped_by_market: dict[str, list[str]] = {}
+
+    for sym in prices.columns:
+        market = ticker_to_market.get(sym, "")
+        threshold = min_turnovers.get(market, 0.0)
+
+        if threshold <= 0:
+            keep.append(sym)
+            continue
+
+        if sym not in volumes.columns:
+            keep.append(sym)
+            continue
+
+        price_s  = prices[sym].dropna()
+        volume_s = volumes[sym].dropna()
+        common   = price_s.index.intersection(volume_s.index)
+        if len(common) < 10:
+            keep.append(sym)
+            continue
+
+        recent       = common[-30:]
+        avg_turnover = float((price_s.loc[recent] * volume_s.loc[recent]).mean())
+
+        if avg_turnover >= threshold:
+            keep.append(sym)
+        else:
+            dropped_by_market.setdefault(market, []).append(sym)
+
+    for market, dropped in dropped_by_market.items():
+        _log(log, f"  Turnover filter ({market}) — dropped {len(dropped)} tickers "
+                  f"below ${min_turnovers[market]:,.0f}/day avg")
+
+    return prices[keep]
 
 def run_screener(
     market_tickers: dict[str, list[str]],
     prices: pd.DataFrame,
     top_n: int = TOP_N,
+    min_turnovers: dict[str, float] | None = None,
     log=None,
 ) -> dict:
     _log(log, "\n  Computing momentum signals…")
@@ -945,6 +1108,26 @@ def run_screener(
     all_tickers = list(prices.columns)
     volumes     = _load_volume(conn, all_tickers)
 
+    # ── Liquidity filter ──────────────────────────────────────────────────────
+    if min_turnovers:
+        ticker_to_market = {
+            t: market
+            for market, tickers in market_tickers.items()
+            for t in tickers
+        }
+        before = len(prices.columns)
+        prices = _apply_turnover_filter(
+            prices,
+            volumes if not volumes.empty else pd.DataFrame(),
+            ticker_to_market,
+            min_turnovers,
+            log=log,
+        )
+        after = len(prices.columns)
+        if before != after:
+            _log(log, f"  Liquidity filter: {before} → {after} tickers "
+                      f"({before - after} removed)")
+
     signals = _compute_signals(prices, volumes if not volumes.empty else None)
     scored  = _score(signals)
 
@@ -954,7 +1137,8 @@ def run_screener(
         for t in tickers
     }
     scored["market"] = scored.index.map(lambda s: ticker_to_market.get(s, "?"))
-    scored = _attach_rank_change(scored, conn)
+    scored = _attach_rank_change(scored, conn, "momentum_score", "rank_change")
+    scored = _attach_rank_change(scored, conn, "weekly_score", "weekly_rank_change")
     conn.close()
 
     overall = scored.dropna(subset=["momentum_score"]).head(top_n).copy()
