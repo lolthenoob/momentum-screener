@@ -121,6 +121,20 @@ def _high_52w_clr(v):
     if v <= -0.30: return CLR_RED     # more than 30% below
     return CLR_YELLOW
 
+def _vol_surge_clr(v):
+    if _nan(v):   return CLR_ROW_A
+    if v > 2.0:   return CLR_GREEN
+    if v > 1.3:   return CLR_BLUE
+    if v < 0.5:   return CLR_RED
+    return CLR_ROW_A
+
+def _ema_clr(v):
+    if _nan(v):     return CLR_ROW_A
+    if v > 0.03:    return CLR_GREEN
+    if v > 0:       return CLR_BLUE
+    if v < -0.03:   return CLR_RED
+    return CLR_YELLOW
+
 def _mk(fn):
     return lambda v, _r: fn(v)
 
@@ -157,6 +171,13 @@ COLUMNS = [
     ("MA200",       "above_ma200",    8,  _fmt_ma_flag,                      _mk(_ma_flag_clr),False),
     ("Vol Ratio",   "vol_ratio",     10,  lambda v, _: _fmt_num(v, 2),      _mk(_vol_ratio_clr), False),
     ("52w High%",   "high_52w_pct",  11,  _fmt_pct,                          _mk(_high_52w_clr),  False),
+    # ── Weekly signals ────────────────────────────────────────────────────────
+    ("Wk Score",    "weekly_score",   10, lambda v, _: _fmt_num(v, 1),      _mk(_score_clr),     False),
+    ("1W Ret",      "ret_1w",         10, _fmt_pct,                          _mk(_ret_clr),       False),
+    ("Wk Slope",    "weekly_exp_slope",11,_fmt_slope,                        _mk(_slope_clr),     False),
+    ("Wk RSI(5)",   "weekly_rsi",      10,lambda v, _: _fmt_num(v, 1),      lambda v, _: _osc_clr(v, 30, 70), False),
+    ("Vol Surge",   "vol_surge",       10,lambda v, _: _fmt_num(v, 2),      _mk(_vol_surge_clr), False),
+    ("vs EMA20",    "price_vs_ema20",  10,_fmt_pct,                          _mk(_ema_clr),       False),
 ]
 
 FROZEN_COLS = [c for c in COLUMNS if     c[5]]
@@ -191,6 +212,7 @@ def show_screener_table(
     master=None,        # legacy: opens a Toplevel if parent_frame not given
     parent_frame=None,  # preferred: embed table directly into this Frame
     on_close=None,      # callback when Close button pressed (embedded mode)
+    rank_mode: str = "normal",  # "normal" | "weekly" | "both"
 ):
     """
     Render the results table.
@@ -281,7 +303,8 @@ def show_screener_table(
 
         # Build the table the first time this tab is shown
         if not tab_built[name]:
-            _build_table(tab_frames[name], tabs_data[name], mono, bold, fs)
+            _build_table(tab_frames[name], tabs_data[name], mono, bold, fs,
+                         rank_mode=rank_mode)
             tab_built[name] = True
 
         tab_frames[name].pack(fill="both", expand=True)
@@ -307,8 +330,14 @@ def show_screener_table(
     # ── Footer ────────────────────────────────────────────────────────────
     footer = tk.Frame(root, bg=CLR_BG, pady=5, padx=12)
     footer.pack(fill="x")
+    if rank_mode == "weekly":
+        footer_txt = "Ranked by Weekly Score  |  Wk Score = 1W Ret · Wk Slope · Wk RSI · Vol Surge · vs EMA20"
+    elif rank_mode == "both":
+        footer_txt = "Both momentum modes shown  |  Ranked by Normal Score"
+    else:
+        footer_txt = "Score = RAM · Exp Slope · 12-1M · 3M · Stoch · RSI · CCI · W%R · MA count  |  ATR & MA flags = raw info"
     tk.Label(footer,
-             text="Score = RAM · Exp Slope · 12-1M · 3M · Stoch · RSI · CCI · W%R · MA count  |  ATR & MA flags = raw info",
+             text=footer_txt,
              bg=CLR_BG, fg=CLR_SUBTEXT, font=mono).pack(side="left")
 
     def _new_scan():
@@ -335,11 +364,38 @@ def show_screener_table(
 
 # ── Table builder ─────────────────────────────────────────────────────────────
 
-def _build_table(parent: tk.Frame, df: pd.DataFrame, mono, bold, fs: int):
+def _build_table(parent: tk.Frame, df: pd.DataFrame, mono, bold, fs: int,
+                 rank_mode: str = "normal"):
     if df.empty:
         tk.Label(parent, text="No data for this market.",
                  bg=CLR_BG, fg=CLR_SUBTEXT, font=mono).pack(pady=40)
         return
+
+    # ── Column set for this rank mode ─────────────────────────────────────
+    # Weekly-only fields — hidden when mode is "normal"
+    _WEEKLY_FIELDS = {"weekly_score", "ret_1w", "weekly_exp_slope",
+                      "weekly_rsi", "vol_surge", "price_vs_ema20"}
+    # Normal-only fields — hidden when mode is "weekly"
+    _NORMAL_FIELDS = {"ram_score", "exp_slope", "ret_12_1", "ret_3m",
+                      "stoch_k", "stoch_d", "rsi", "cci", "wpr",
+                      "atr", "above_ma25", "above_ma50", "above_ma100",
+                      "above_ma200", "vol_ratio", "high_52w_pct"}
+
+    if rank_mode == "weekly":
+        _keep = lambda c: c[1] not in _NORMAL_FIELDS
+        _default_sort = "weekly_score"
+    elif rank_mode == "normal":
+        _keep = lambda c: c[1] not in _WEEKLY_FIELDS
+        _default_sort = "momentum_score"
+    else:  # "both"
+        _keep = lambda c: True
+        _default_sort = "momentum_score"
+
+    # Always keep frozen cols; filter scroll cols by mode
+    _active_frozen = [c for c in FROZEN_COLS if _keep(c)]
+    _active_scroll = [c for c in SCROLL_COLS if _keep(c)]
+    # Build a local ordered column list (frozen first) for index lookups
+    _active_cols   = _active_frozen + _active_scroll
 
     df = df.reset_index()
     # reset_index() moves the ticker index to a column; normalise to "symbol"
@@ -380,7 +436,7 @@ def _build_table(parent: tk.Frame, df: pd.DataFrame, mono, bold, fs: int):
     # ── Frozen pane ───────────────────────────────────────────────────────
     # Calculate exact pixel width of all frozen columns so the pane doesn't
     # expand beyond its content (which creates the visible gap before Name).
-    frozen_pane_w = sum(px(COLUMNS.index(c)) for c in FROZEN_COLS)
+    frozen_pane_w = sum(px(COLUMNS.index(c)) for c in _active_frozen)
     frozen_pane = tk.Frame(outer, bg=CLR_HDR_BG, width=frozen_pane_w)
     frozen_pane.pack(side="left", fill="y")
     frozen_pane.pack_propagate(False)
@@ -461,12 +517,12 @@ def _build_table(parent: tk.Frame, df: pd.DataFrame, mono, bold, fs: int):
         w.bind("<Button-5>",   _on_mw)
 
     # ── Sort state ────────────────────────────────────────────────────────
-    sort_state   = {"col": "momentum_score", "asc": False}
+    sort_state   = {"col": _default_sort, "asc": False}
     all_hdr_btns = {}
 
     def _refresh_arrows():
         for f, btn in all_hdr_btns.items():
-            lbl = next(c[0] for c in COLUMNS if c[1] == f)
+            lbl = next(c[0] for c in _active_cols if c[1] == f)
             if f == sort_state["col"]:
                 btn.config(text=lbl + (" ↑" if sort_state["asc"] else " ↓"), fg="#FFD700")
             else:
@@ -494,8 +550,8 @@ def _build_table(parent: tk.Frame, df: pd.DataFrame, mono, bold, fs: int):
         cf.pack_propagate(False)
         cf.pack(side="left")
 
-        arrow = " ↓" if field == "momentum_score" else " ↕"
-        fg    = "#FFD700" if field == "momentum_score" else CLR_HDR_FG
+        arrow = " ↓" if field == _default_sort else " ↕"
+        fg    = "#FFD700" if field == _default_sort else CLR_HDR_FG
         btn   = tk.Button(cf, text=label + arrow, font=bold,
                           bg=CLR_HDR_BG, fg=fg,
                           activebackground="#333355", activeforeground="white",
@@ -522,10 +578,10 @@ def _build_table(parent: tk.Frame, df: pd.DataFrame, mono, bold, fs: int):
         handle.bind("<ButtonPress-1>", _start)
         handle.bind("<B1-Motion>",     _drag)
 
-    for col in FROZEN_COLS:
+    for col in _active_frozen:
         _make_hdr_cell(frozen_hdr, col, COLUMNS.index(col))
 
-    for col in SCROLL_COLS:
+    for col in _active_scroll:
         _make_hdr_cell(scroll_hdr_inner, col, COLUMNS.index(col))
 
     def _place_scroll_hdr(*_):
@@ -596,7 +652,7 @@ def _build_table(parent: tk.Frame, df: pd.DataFrame, mono, bold, fs: int):
             for ev in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
                 frf.bind(ev, _on_mw)
 
-            for col in FROZEN_COLS:
+            for col in _active_frozen:
                 _make_cell(frf, col[1], row.get(col[1]), COLUMNS.index(col), bg, row)
 
             srf = tk.Frame(scroll_inner, bg=bg)
@@ -605,7 +661,7 @@ def _build_table(parent: tk.Frame, df: pd.DataFrame, mono, bold, fs: int):
             for ev in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
                 srf.bind(ev, _on_mw)
 
-            for col in SCROLL_COLS:
+            for col in _active_scroll:
                 _make_cell(srf, col[1], row.get(col[1]), COLUMNS.index(col), bg, row)
 
         # Defer geometry updates so the window event loop stays responsive.
@@ -618,4 +674,4 @@ def _build_table(parent: tk.Frame, df: pd.DataFrame, mono, bold, fs: int):
             lambda: scroll_canvas.configure(scrollregion=scroll_canvas.bbox("all"))
         )
 
-    _render(df.sort_values("momentum_score", ascending=False, na_position="last"))
+    _render(df.sort_values(_default_sort, ascending=False, na_position="last"))

@@ -625,6 +625,7 @@ def launch():
     force_signals_var  = tk.BooleanVar(value=False)
     tickers_var        = tk.BooleanVar(value=False)
     export_var         = tk.BooleanVar(value=config.get_bool("export_csv"))
+    rank_mode_var      = tk.StringVar(value=config.get("rank_mode") or "normal")
 
     _active = config.get_active_markets()
     market_vars = {
@@ -668,8 +669,11 @@ def launch():
         # ── Market selector ───────────────────────────────────────────────
         mkt_frame = tk.Frame(launcher_panel, bg=CLR_BG, padx=pad_x, pady=pad_y)
         mkt_frame.pack(fill="x")
-        tk.Label(mkt_frame, text="Markets (Togglable):", bg=CLR_BG, fg=CLR_SUBTEXT,
-                 font=bold(), anchor="w").pack(fill="x")
+
+        mkt_hdr_row = tk.Frame(mkt_frame, bg=CLR_BG)
+        mkt_hdr_row.pack(fill="x")
+        tk.Label(mkt_hdr_row, text="Markets (Togglable):", bg=CLR_BG, fg=CLR_SUBTEXT,
+                 font=bold(), anchor="w").pack(side="left")
 
         mkt_btns = {}
 
@@ -677,6 +681,27 @@ def launch():
             any_on = any(v.get() for v in market_vars.values())
             run_btn.config(state="normal" if any_on else "disabled",
                            bg=CLR_ACCENT if any_on else "#AAAAAA")
+
+        def _toggle_all_markets():
+            all_on = all(v.get() for v in market_vars.values())
+            new_state = not all_on      # if all on → turn all off, otherwise all on
+            for mkt, v in market_vars.items():
+                v.set(new_state)
+                clr = MARKET_COLOURS_UI[mkt]
+                mkt_btns[mkt].config(
+                    text="☑" if new_state else "☐",
+                    fg=clr if new_state else "#AAAAAA",
+                )
+            _update_run_btn()
+
+        toggle_all_btn = tk.Button(
+            mkt_hdr_row, text="Select All / None",
+            font=bold(), bg="#E8EDF4", fg=CLR_TEXT,
+            activebackground=CLR_ACCENT, activeforeground="white",
+            relief="flat", bd=0, padx=8, pady=2, cursor="hand2",
+            command=_toggle_all_markets,
+        )
+        toggle_all_btn.pack(side="right")
 
         for mkt, var in market_vars.items():
             clr  = MARKET_COLOURS_UI[mkt]
@@ -729,6 +754,39 @@ def launch():
         _make_toggle(opt_frame, "Force recompute momentum signals",           force_signals_var)
         _make_toggle(opt_frame, "Refresh ticker lists (ignore weekly cache)", tickers_var)
         _make_toggle(opt_frame, "Export results to CSV after run",            export_var)
+
+        # Ranking mode — same tick style as market toggles, mutually exclusive
+        rank_row = tk.Frame(opt_frame, bg=CLR_BG)
+        rank_row.pack(fill="x", pady=max(1, fs // 6))
+        tk.Label(rank_row, text="Rank by:", bg=CLR_BG,
+                 fg=CLR_TEXT, font=bold()).pack(side="left")
+
+        _rank_btns = {}
+        _rank_modes = [("normal", "Normal momentum"),
+                       ("weekly", "Weekly momentum"),
+                       ("both",   "Both")]
+
+        def _select_rank_mode(chosen):
+            rank_mode_var.set(chosen)
+            for val, btn in _rank_btns.items():
+                btn.config(text="☑" if val == chosen else "☐",
+                           fg=CLR_ACCENT if val == chosen else "#AAAAAA")
+
+        for mode_val, mode_lbl in _rank_modes:
+            cell = tk.Frame(rank_row, bg=CLR_BG)
+            cell.pack(side="left", padx=(10, 0))
+            is_on = rank_mode_var.get() == mode_val
+            btn = tk.Button(cell, text="☑" if is_on else "☐",
+                            font=tick_f(),
+                            fg=CLR_ACCENT if is_on else "#AAAAAA",
+                            bg=CLR_BG, activebackground=CLR_BG,
+                            relief="flat", bd=0, cursor="hand2",
+                            command=lambda v=mode_val: _select_rank_mode(v))
+            btn.pack(side="left")
+            tk.Label(cell, text=mode_lbl, bg=CLR_BG, fg=CLR_TEXT,
+                     font=bold(), cursor="hand2").pack(side="left")
+            cell.bind("<Button-1>", lambda e, v=mode_val: _select_rank_mode(v))
+            _rank_btns[mode_val] = btn
 
         # Cache age info
         age_frame = tk.Frame(launcher_panel, bg=CLR_BG, padx=pad_x)
@@ -846,7 +904,7 @@ def launch():
 
     run_again_btn.config(command=_switch_to_launcher)
 
-    def _show_results_inline(res):
+    def _show_results_inline(res, rank_mode="normal"):
         status_panel.pack_forget()
         menubar_frame.pack_forget()
         for w in results_panel.winfo_children():
@@ -858,7 +916,8 @@ def launch():
                 root.attributes("-zoomed", True)
             except tk.TclError:
                 pass
-        show_screener_table(res, parent_frame=results_panel, on_close=_switch_to_launcher)
+        show_screener_table(res, parent_frame=results_panel, on_close=_switch_to_launcher,
+                            rank_mode=rank_mode)
         results_panel.pack(fill="both", expand=True)
 
     def _on_prefs_saved():
@@ -928,17 +987,19 @@ def launch():
             top_n = config.get_int("top_n") or 50
         config.set("top_n", top_n)
         config.set("export_csv", export_var.get())
+        config.set("rank_mode", rank_mode_var.get())
         selected_markets = [m for m, v in market_vars.items() if v.get()]
         config.set_active_markets(selected_markets)
         _switch_to_status()
         threading.Thread(
             target=_run_screener,
             args=(top_n, download_var.get(), force_signals_var.get(),
-                  tickers_var.get(), export_var.get(), selected_markets),
+                  tickers_var.get(), export_var.get(), selected_markets,
+                  rank_mode_var.get()),
             daemon=True,
         ).start()
 
-    def _run_screener(top_n, do_download, force_signals, force_tickers, do_export, selected_markets):
+    def _run_screener(top_n, do_download, force_signals, force_tickers, do_export, selected_markets, rank_mode="normal"):
         try:
             _set_subtitle("Loading ticker lists…")
             _log("─" * 55)
@@ -971,7 +1032,7 @@ def launch():
                     _log("  Opening results table…")
                     _log("─" * 55)
                     root.after(0, lambda: run_again_btn.pack(side="left"))
-                    root.after(200, lambda: _show_results_inline(results))
+                    root.after(200, lambda: _show_results_inline(results, rank_mode))
                     return
                 else:
                     _log("  ⚠  No cached signals found — will download and compute.")
@@ -997,7 +1058,8 @@ def launch():
             _log("\n" + "─" * 55)
             _log("STEP 3 — Momentum scoring")
             _log("─" * 55)
-            results = run_screener(market_tickers, prices, top_n=top_n, log=_log)
+            results = run_screener(market_tickers, prices, top_n=top_n,
+                                   min_turnovers=config.get_all_min_turnovers(), log=_log)
 
             if not results:
                 _log("\n  ✗ No results — check price data above.")
@@ -1020,7 +1082,7 @@ def launch():
             _log("─" * 55)
 
             root.after(0, lambda: run_again_btn.pack(side="left"))
-            root.after(200, lambda: _show_results_inline(results))
+            root.after(200, lambda: _show_results_inline(results, rank_mode))
 
         except Exception as e:
             import traceback

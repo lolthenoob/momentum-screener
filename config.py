@@ -11,17 +11,25 @@ _BASE    = os.path.dirname(os.path.abspath(__file__))
 INI_PATH = os.path.join(_BASE, "screener.ini")
 
 DEFAULTS = {
-    "top_n":            "50",
-    "font_size":        "12",
-    "col_widths":       "",       # comma-separated pixel widths, rebuilt if empty
-    "export_csv":       "false",
-    "output_dir":       "",       # defaults to <app>/output at runtime
-    "auto_resize":      "false",  # when true, window sizes scale with font; W/H fields ignored
-    "launcher_w":       "720",
-    "launcher_h":       "580",
-    "table_w":          "1600",
-    "table_h":          "860",
-    "active_markets":   "US,AU,NZ,SG",
+    "top_n":                    "50",
+    "font_size":                "12",
+    "col_widths":               "",       # comma-separated pixel widths, rebuilt if empty
+    "export_csv":               "false",
+    "output_dir":               "",       # defaults to <app>/output at runtime
+    "auto_resize":              "false",  # when true, window sizes scale with font; W/H fields ignored
+    "launcher_w":               "720",
+    "launcher_h":               "580",
+    "table_w":                  "1600",
+    "table_h":                  "860",
+    "active_markets":           "US,AU,NZ,SG",
+    "rank_mode":                "normal",
+    # Minimum average daily dollar turnover (price × volume) per market.
+    # Tickers below this threshold are excluded before scoring.
+    # Set to 0 to disable the filter for that market.
+    "min_turnover_us":          "10000000",   # $10M  — S&P 500 safety net
+    "min_turnover_au":          "500000",     # $500k — filters penny stocks
+    "min_turnover_nz":          "100000",     # $100k — small market, lenient
+    "min_turnover_sg":          "500000",     # $500k
 }
 
 
@@ -89,6 +97,25 @@ def save_col_widths(widths: list):
 def clear_col_widths():
     """Call after font size change so columns auto-resize to new font."""
     set("col_widths", "")
+
+
+def get_min_turnover(market: str) -> float:
+    """Return minimum avg daily dollar turnover for a market. 0 = disabled."""
+    key = f"min_turnover_{market.lower()}"
+    try:
+        val = float(get(key))
+        return max(0.0, val)
+    except (ValueError, TypeError):
+        return float(DEFAULTS.get(key, 0))
+
+
+def set_min_turnover(market: str, value: float):
+    set(f"min_turnover_{market.lower()}", value)
+
+
+def get_all_min_turnovers() -> dict:
+    """Return {market: min_turnover} for all four markets."""
+    return {m: get_min_turnover(m) for m in ["US", "AU", "NZ", "SG"]}
 
 
 def get_active_markets() -> list[str]:
