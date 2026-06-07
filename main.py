@@ -127,6 +127,15 @@ def _show_prefs(root, on_save=None):
     ).grid(row=lrow, column=0, columnspan=2, sticky="w", pady=(0, 4))
     lrow += 1
 
+    always_export_var = tk.BooleanVar(value=config.get_bool("always_export_csv"))
+    tk.Checkbutton(
+        left_pane, text="Always export CSV after every run",
+        variable=always_export_var, bg=CLR_BG, fg=CLR_TEXT, font=fb,
+        activebackground=CLR_BG, selectcolor=CLR_BG,
+        relief="flat", bd=0, cursor="hand2",
+    ).grid(row=lrow, column=0, columnspan=2, sticky="w", pady=(0, 4))
+    lrow += 1
+
     for label, key in size_fields:
         tk.Label(left_pane, text=label, bg=CLR_BG, fg=CLR_TEXT,
                  font=fb, anchor="w", width=26).grid(
@@ -268,6 +277,7 @@ def _show_prefs(root, on_save=None):
     def _save():
         old_fs = config.font_size()
         config._set("auto_resize", auto_resize_var.get())
+        config._set("always_export_csv", always_export_var.get())
         for key, v in vars_.items():
             if key in [k for _, k in size_fields] and auto_resize_var.get():
                 continue
@@ -770,7 +780,7 @@ def launch():
     download_var       = tk.BooleanVar(value=False)
     force_signals_var  = tk.BooleanVar(value=False)
     tickers_var        = tk.BooleanVar(value=False)
-    export_var         = tk.BooleanVar(value=config.get_bool("export_csv"))
+    export_var         = tk.BooleanVar(value=config.get_bool("always_export_csv"))
     rank_mode_var      = tk.StringVar(value=config.get("rank_mode") or "normal")
 
     # ── Watchlist vars (persistence only — picker owns download/export/rank) ──
@@ -901,6 +911,16 @@ def launch():
         _make_toggle(opt_frame, "Force recompute momentum signals",           force_signals_var)
         _make_toggle(opt_frame, "Refresh ticker lists (ignore weekly cache)", tickers_var)
         _make_toggle(opt_frame, "Export results to CSV after run",            export_var)
+
+        # If always_export_csv is set in prefs, lock the export toggle on and grey it out
+        always_export = config.get_bool("always_export_csv")
+        if always_export:
+            export_var.set(True)
+            export_row = opt_frame.winfo_children()[-1]
+            for child in export_row.winfo_children():
+                child.config(state="disabled")
+            tk.Label(export_row, text="  (always on — set in Preferences)",
+                     bg=CLR_BG, fg=CLR_SUBTEXT, font=mono()).pack(side="left")
 
         # Ranking mode
         rank_row = tk.Frame(opt_frame, bg=CLR_BG)
@@ -1133,7 +1153,7 @@ def launch():
         download_var.set(False)
         force_signals_var.set(False)
         tickers_var.set(False)
-        export_var.set(config.get_bool("export_csv"))
+        export_var.set(config.get_bool("always_export_csv"))
         try:
             root.state("normal")
         except tk.TclError:
@@ -1231,7 +1251,6 @@ def launch():
         except ValueError:
             top_n = config.get_int("top_n") or 50
         config._set("top_n", top_n)
-        config._set("export_csv", export_var.get())
         config._set("rank_mode", rank_mode_var.get())
         selected_markets = [m for m, v in market_vars.items() if v.get()]
         config.set_active_markets(selected_markets)

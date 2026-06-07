@@ -195,7 +195,20 @@ def _fetch_us(log=None) -> list:
     _log(log, "  US  — fetching NYSE list from GitHub…")
     nyse_tickers = _fetch_nyse_csv(log)
 
-    combined = list(dict.fromkeys(nasdaq_tickers + nyse_tickers))
+    # Translate Yahoo Finance notation: NASDAQ/NYSE use ^ and / for preferred
+    # shares and share classes; Yahoo expects - (e.g. AGM^F → AGM-F, AKO/B → AKO-B)
+    # Then drop preferred share series (BASE-X or BASE-XX suffixes) — Yahoo has
+    # no price data for most of them and they pollute the results.
+    import re as _re
+    _preferred_re = _re.compile(r"^[A-Z0-9]+-[A-Z]{0,2}$")
+
+    def _normalise(sym: str) -> str:
+        return sym.replace("^", "-").replace("/", "-")
+
+    all_normalised = [_normalise(t) for t in nasdaq_tickers + nyse_tickers]
+    combined = list(dict.fromkeys(
+        t for t in all_normalised if not _preferred_re.match(t)
+    ))
 
     if combined:
         _log(log, f"  US  — {len(combined)} tickers total (NASDAQ + NYSE, deduped)")
