@@ -13,28 +13,28 @@ INI_PATH = os.path.join(_BASE, "screener.ini")
 DEFAULTS = {
     "top_n":                    "50",
     "font_size":                "12",
-    "col_widths":               "",       # comma-separated pixel widths, rebuilt if empty
+    "col_widths":               "",
     "export_csv":               "false",
-    "output_dir":               "",       # defaults to <app>/output at runtime
-    "auto_resize":              "true",  # when true, window sizes scale with font; W/H fields ignored
+    "always_export_csv":        "false",
+    "output_dir":               "",
+    "auto_resize":              "true",
     "launcher_w":               "720",
     "launcher_h":               "580",
     "table_w":                  "1600",
     "table_h":                  "860",
-    "active_markets":           "US,AU,NZ,SG",
+    "active_markets":           "US,AU,NZ,SG,MY",
     "rank_mode":                "normal",
-    "hidden_cols":              "",   # comma-separated field names to hide
-    "col_order":                "",   # comma-separated field names (scroll cols only)
+    "hidden_cols":              "",
+    "col_order":                "",
     # Watchlist mode
-    "watchlist_tickers":        "",   # last-used watchlist, comma-separated
+    "watchlist_tickers":        "",
     "watchlist_rank_mode":      "normal",
-    # Minimum average daily dollar turnover (price × volume) per market.
-    # Tickers below this threshold are excluded before scoring.
-    # Set to 0 to disable the filter for that market.
-    "min_turnover_us":          "10000000",   # $10M  — S&P 500 safety net
-    "min_turnover_au":          "2000000",     # $500k — filters penny stocks
-    "min_turnover_nz":          "100000",     # $100k — small market, lenient
-    "min_turnover_sg":          "500000",     # $500k
+    # Minimum average daily dollar turnover per market. 0 = disabled.
+    "min_turnover_us":          "10000000",   # $10M
+    "min_turnover_au":          "2000000",    # $2M
+    "min_turnover_nz":          "100000",     # $100k
+    "min_turnover_sg":          "500000",     # SGD 500k
+    "min_turnover_my":          "500000",     # MYR 500k
 }
 
 
@@ -82,7 +82,6 @@ def font_size() -> int:
 
 
 def col_pixel_width(col_index: int, default_chars: int) -> int:
-    """Return saved pixel width for a column, or derive from font + default chars."""
     raw = get("col_widths").strip()
     if raw:
         try:
@@ -91,7 +90,6 @@ def col_pixel_width(col_index: int, default_chars: int) -> int:
                 return max(20, widths[col_index])
         except ValueError:
             pass
-    # Auto-size: roughly font_size * 1.5 pixels per character (Consolas)
     return max(30, default_chars * int(font_size() * 1.5))
 
 
@@ -100,12 +98,10 @@ def save_col_widths(widths: list):
 
 
 def clear_col_widths():
-    """Call after font size change so columns auto-resize to new font."""
     _set("col_widths", "")
 
 
 def get_min_turnover(market: str) -> float:
-    """Return minimum avg daily dollar turnover for a market. 0 = disabled."""
     key = f"min_turnover_{market.lower()}"
     try:
         val = float(get(key))
@@ -119,14 +115,13 @@ def set_min_turnover(market: str, value: float):
 
 
 def get_all_min_turnovers() -> dict:
-    """Return {market: min_turnover} for all four markets."""
-    return {m: get_min_turnover(m) for m in ["US", "AU", "NZ", "SG"]}
+    return {m: get_min_turnover(m) for m in ["US", "AU", "NZ", "SG", "MY"]}
 
 
 def get_active_markets() -> list[str]:
     raw = get("active_markets").strip()
     if not raw:
-        return ["US", "AU", "NZ", "SG"]
+        return ["US", "AU", "NZ", "SG", "MY"]
     return [m.strip().upper() for m in raw.split(",") if m.strip()]
 
 
@@ -135,7 +130,6 @@ def set_active_markets(markets: list[str]):
 
 
 def get_hidden_cols() -> set:
-    """Return set of field names the user has hidden."""
     raw = get("hidden_cols").strip()
     if not raw:
         return set()
@@ -147,7 +141,6 @@ def set_hidden_cols(fields: set):
 
 
 def get_col_order() -> list:
-    """Return ordered list of scroll-column field names, or [] if unset."""
     raw = get("col_order").strip()
     if not raw:
         return []

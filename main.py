@@ -368,20 +368,22 @@ def _show_about(root):
 
     # ── Content ───────────────────────────────────────────────────────────
     ins("Momentum Screener\n", "h1")
-    ins("Ranks stocks across US, AU, NZ, and SG markets by a composite\n"
+    ins("Ranks stocks across US, AU, NZ, SG, and MY markets by a composite\n"
         "momentum score built from 9 technical signals.\n\n", "sub")
 
     ins("─" * 60 + "\n", "rule")
     ins("DATA SOURCES\n", "h2")
     ins("─" * 60 + "\n", "rule")
     ins(
-        "  US   S&P 500 constituent list — scraped from Wikipedia.\n"
+        "  US   NYSE + NASDAQ full list — NASDAQ screener CSV (local)\n"
+        "       + NYSE list from GitHub (datasets/nyse-other-listings).\n"
         "  AU   ASX listed companies — CSV downloaded from asx.com.au,\n"
         "       or ASX 200 from Wikipedia if no CSV is present.\n"
         "  NZ   NZSX equity list — scraped live from nzx.com.\n"
-        "       Warrants, ETFs, and preference shares are excluded.\n"
-        "  SG   Top 150 SGX stocks by market cap — stockanalysis.com.\n"
-        "       Cross-listed HK/China codes are excluded.\n\n"
+        "  SG   Full SGX list — scraped from stockanalysis.com.\n"
+        "       Cross-listed HK/China codes are excluded.\n"
+        "  MY   Bursa Malaysia (KLSE) — parsed from official Bursa PDF\n"
+        "       in the data/ folder, or scraped from stockanalysis.com.\n\n"
         "  Ticker lists are cached locally for 7 days.\n"
         "  Price history (2 years) is fetched from Yahoo Finance\n"
         "  and stored in a local SQLite database (data/momentum.db).\n\n",
@@ -528,7 +530,7 @@ def launch():
 
     def _apply_launcher_size():
         base_w = 900
-        base_h = 800
+        base_h = 850
 
         if config.get_bool("auto_resize"):
             fs    = config.font_size()
@@ -743,7 +745,7 @@ def launch():
         hdr.pack(fill="x")
         tk.Label(hdr, text="Momentum Screener",
                  bg=CLR_ACCENT, fg="white", font=hdr_bold()).pack()
-        tk.Label(hdr, text="US · AU · NZ · SG",
+        tk.Label(hdr, text="US · AU · NZ · SG · MY",
                  bg=CLR_ACCENT, fg="#D0EEFF", font=hdr_sub()).pack()
 
     # ── Toggle helper ─────────────────────────────────────────────────────
@@ -782,9 +784,10 @@ def launch():
         "AU": tk.BooleanVar(value="AU" in _active),
         "NZ": tk.BooleanVar(value="NZ" in _active),
         "SG": tk.BooleanVar(value="SG" in _active),
+        "MY": tk.BooleanVar(value="MY" in _active),
     }
-    MARKET_LABELS    = {"US": "US  (S&P 500)", "AU": "AU  (ASX)", "NZ": "NZ  (NZX)", "SG": "SG  (SGX / STI)"}
-    MARKET_COLOURS_UI = {"US": "#00A4EF", "AU": "#10B981", "NZ": "#8B5CF6", "SG": "#F59E0B"}
+    MARKET_LABELS     = {"US": "US  (NYSE + NASDAQ)", "AU": "AU  (ASX)", "NZ": "NZ  (NZX)", "SG": "SG  (SGX)", "MY": "MY  (Bursa / KLSE)"}
+    MARKET_COLOURS_UI = {"US": "#00A4EF", "AU": "#10B981", "NZ": "#8B5CF6", "SG": "#F59E0B", "MY": "#EF4444"}
 
     # ── Build launcher content ────────────────────────────────────────────
     def _build_screener_pane(parent):
@@ -796,7 +799,7 @@ def launch():
         info_frame.pack(fill="x")
 
         for label, val in [
-            ("Universe",  "S&P 500 · ASX 300 · NZX 50 · STI + SGX"),
+            ("Universe",  "NYSE + NASDAQ · ASX · NZX · SGX · Bursa Malaysia"),
             ("Signals",   "RAM · Exp Slope · 12-1M · 3M · Stoch · RSI · CCI · W%R · MA"),
             ("Output",    f"Top {top_n_var.get()} per market + overall leaderboard"),
             ("Cache",     "Results loaded from local cache unless boxes ticked below"),
@@ -1351,6 +1354,8 @@ def launch():
                     mkt = "NZ"
                 elif sym.endswith(".SI"):
                     mkt = "SG"
+                elif sym.endswith(".KL"):
+                    mkt = "MY"
                 else:
                     mkt = "US"
                 market_tickers.setdefault(mkt, []).append(sym)
